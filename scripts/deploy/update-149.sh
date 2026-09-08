@@ -14,5 +14,26 @@ if [[ -z "$APP_ROOT" && -d /home/ubuntu/rag-explorer-ai ]]; then
   APP_ROOT=/home/ubuntu/rag-explorer-ai
 fi
 [[ -n "$APP_ROOT" ]] || { echo "update-149.sh: --app-root required (rag-explorer-ai checkout)" >&2; exit 1; }
+
+# 149 出网走 squid；不要把代理 URL 打进日志。
+load_build_proxy() {
+  local file key line value
+  for file in "$APP_ROOT/.env" "$APP_ROOT/install/.env" "$APP_ROOT/.env.local"; do
+    [[ -f "$file" ]] || continue
+    for key in BUILD_HTTPS_PROXY RAG_OUTBOUND_PROXY HTTPS_PROXY HTTP_PROXY; do
+      line="$(grep -E "^${key}=" "$file" | tail -1 || true)"
+      [[ -n "$line" ]] || continue
+      value="${line#*=}"
+      value="${value%$'\r'}"
+      [[ -n "$value" ]] || continue
+      export HTTP_PROXY="$value" HTTPS_PROXY="$value" http_proxy="$value" https_proxy="$value" BUILD_HTTPS_PROXY="$value"
+      echo "compose build proxy: $key from env file (value not printed)"
+      return 0
+    done
+  done
+  return 0
+}
+load_build_proxy
+
 bash "$HERE/standalone.sh" --mode docker --stack 149 --app-root "$APP_ROOT"
 echo "149 platform-gateway image built and recreated (--no-build in app compose)"

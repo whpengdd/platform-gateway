@@ -24,6 +24,7 @@ test("host standalone never fuser-kills 8091 or binds 0.0.0.0", () => {
   assert.match(src, /up -d --no-build --no-deps rag-explorer-platform-gateway/);
   assert.match(src, /seq 1 30/);
   assert.match(src, /LISTEN must be loopback/);
+  assert.match(src, /extracting binary from docker image/);
 });
 
 test("build-image tags VERSION", () => {
@@ -38,4 +39,6 @@ test("app-stack updates require app-root and do not go-build inside rag-explorer
   assert.match(read("update-public.sh"), /--app-root/);
   assert.match(read("update-151.sh"), /--mode host/);
   assert.doesNotMatch(read("update-149.sh"), /gateway\/bin/);
+  assert.match(read("update-149.sh"), /BUILD_HTTPS_PROXY/);
+  assert.match(read("update-public.sh"), /BUILD_HTTPS_PROXY/);
 });

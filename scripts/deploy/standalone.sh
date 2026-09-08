@@ -83,9 +83,19 @@ start_host() {
   ENV_FILE="${ENV_FILE:-$APP_ROOT/.env.local}"
   mkdir -p "$APP_ROOT/logs/platform-gateway" "$ROOT/bin"
   local go_bin=""
-  go_bin="$(resolve_go)" || die "no go toolchain on PATH (need Go 1.23)"
-  echo "building bin/platform-gateway"
-  ( cd "$ROOT" && "$go_bin" build -o bin/platform-gateway ./cmd/gateway )
+  if go_bin="$(resolve_go)"; then
+    echo "building bin/platform-gateway"
+    ( cd "$ROOT" && "$go_bin" build -o bin/platform-gateway ./cmd/gateway )
+  else
+    echo "no go toolchain; extracting binary from docker image"
+    local image
+    image="$(bash "$HERE/build-image.sh")"
+    local cid
+    cid="$(docker create "$image")"
+    docker cp "$cid:/platform-gateway" "$ROOT/bin/platform-gateway"
+    docker rm "$cid" >/dev/null
+    chmod +x "$ROOT/bin/platform-gateway"
+  fi
 
   local pid_file="$APP_ROOT/gateway.pid"
   if [[ -f "$pid_file" ]]; then
