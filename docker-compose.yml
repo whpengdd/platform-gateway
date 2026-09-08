@@ -18,6 +18,7 @@ services:
       CK_LOGS_BASIC_USER: ${CK_LOGS_BASIC_USER:-}
       CK_LOGS_BASIC_PASS: ${CK_LOGS_BASIC_PASS:-}
       CK_LOGS_INDEX: ${CK_LOGS_INDEX:-mtatrans_distributed}
+      # One shared Kibana queue for self-service and analysis routes.
       CKLOGS_MAX_CONCURRENCY: ${CKLOGS_MAX_CONCURRENCY:-2}
       CKLOGS_QUEUE_SIZE: ${CKLOGS_QUEUE_SIZE:-32}
       CKLOGS_QUEUE_WAIT_MS: ${CKLOGS_QUEUE_WAIT_MS:-30000}
