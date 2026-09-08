@@ -20,8 +20,8 @@ test("host standalone never fuser-kills 8091 or binds 0.0.0.0", () => {
   assert.match(src, /127\.0\.0\.1:8091/);
   assert.match(src, /--mode host\|docker/);
   assert.match(src, /--stack self\|install\|149/);
-  assert.match(src, /up -d --no-build --no-deps platform-gateway/);
-  assert.match(src, /up -d --no-build --no-deps rag-explorer-platform-gateway/);
+  assert.match(src, /up -d --no-build --force-recreate --no-deps platform-gateway/);
+  assert.match(src, /up -d --no-build --force-recreate --no-deps rag-explorer-platform-gateway/);
   assert.match(src, /seq 1 30/);
   assert.match(src, /LISTEN must be loopback/);
   assert.match(src, /extracting binary from docker image/);

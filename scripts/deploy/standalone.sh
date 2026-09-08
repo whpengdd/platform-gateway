@@ -136,7 +136,7 @@ start_docker_app() {
       [[ -f "$compose" ]] || die "missing $compose"
       PLATFORM_GATEWAY_IMAGE="$image" docker compose --project-directory "$APP_ROOT/install" \
         -f "$compose" --profile platform-gateway \
-        up -d --no-build --no-deps platform-gateway
+        up -d --no-build --force-recreate --no-deps platform-gateway
       ;;
     149)
       local compose="$APP_ROOT/install/docker-compose.intranet-149.yml"
@@ -144,7 +144,7 @@ start_docker_app() {
       PLATFORM_GATEWAY_IMAGE="$image" docker compose --project-directory "$APP_ROOT" \
         --project-name rag-explorer-ai \
         -f "$compose" --profile platform-gateway \
-        up -d --no-build --no-deps rag-explorer-platform-gateway
+        up -d --no-build --force-recreate --no-deps rag-explorer-platform-gateway
       ;;
   esac
   echo "started docker platform-gateway stack=$STACK image=$image"
