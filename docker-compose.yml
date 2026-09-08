@@ -1,0 +1,28 @@
+services:
+  platform-gateway:
+    build:
+      context: .
+    image: rag-explorer-ai-platform-gateway:${PLATFORM_GATEWAY_TAG:-1.0.0}
+    ports:
+      - "127.0.0.1:8091:8091"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      LISTEN_ADDR: ":8091"
+      GATEWAY_AUTH_TOKENS: ${GATEWAY_AUTH_TOKENS:-}
+      GATEWAY_TOKEN_EXTERNAL: ${GATEWAY_TOKEN_EXTERNAL:-}
+      GATEWAY_TOKEN_INTERNAL: ${GATEWAY_TOKEN_INTERNAL:-}
+      GATEWAY_ALLOW_CIDRS: ${GATEWAY_ALLOW_CIDRS:-}
+      CK_LOGS_BASE_URL: ${CK_LOGS_BASE_URL:-https://ck-logs.icoremail.net}
+      CK_LOGS_BASIC_USER: ${CK_LOGS_BASIC_USER:-}
+      CK_LOGS_BASIC_PASS: ${CK_LOGS_BASIC_PASS:-}
+      CK_LOGS_INDEX: ${CK_LOGS_INDEX:-mtatrans_distributed}
+      CKLOGS_MAX_CONCURRENCY: ${CKLOGS_MAX_CONCURRENCY:-2}
+      CKLOGS_QUEUE_SIZE: ${CKLOGS_QUEUE_SIZE:-32}
+      CKLOGS_QUEUE_WAIT_MS: ${CKLOGS_QUEUE_WAIT_MS:-30000}
+      CK_LOGS_TIMEOUT_MS: ${CK_LOGS_TIMEOUT_MS:-60000}
+      GATEWAY_LOG_DIR: /var/log/platform-gateway
+    volumes:
+      - ${PLATFORM_GATEWAY_LOG_HOST_DIR:-./logs}:/var/log/platform-gateway
+    restart: unless-stopped
