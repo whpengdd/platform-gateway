@@ -17,25 +17,23 @@ import (
 )
 
 type Config struct {
-	Auth         *auth.Checker
-	CK           *cklogs.Service
-	Gate         backend.Gate
-	AnalysisGate backend.Gate
-	Audit        *auditlog.Writer
-	CKUser       string
-	CKPass       string
-	Now          func() time.Time
+	Auth   *auth.Checker
+	CK     *cklogs.Service
+	Gate   backend.Gate
+	Audit  *auditlog.Writer
+	CKUser string
+	CKPass string
+	Now    func() time.Time
 }
 
 type Server struct {
-	auth         *auth.Checker
-	ck           *cklogs.Service
-	gate         backend.Gate
-	analysisGate backend.Gate
-	audit        *auditlog.Writer
-	ckUser       string
-	ckPass       string
-	now          func() time.Time
+	auth   *auth.Checker
+	ck     *cklogs.Service
+	gate   backend.Gate
+	audit  *auditlog.Writer
+	ckUser string
+	ckPass string
+	now    func() time.Time
 }
 
 func New(cfg Config) http.Handler {
@@ -44,14 +42,13 @@ func New(cfg Config) http.Handler {
 		now = time.Now
 	}
 	s := &Server{
-		auth:         cfg.Auth,
-		ck:           cfg.CK,
-		gate:         cfg.Gate,
-		analysisGate: cfg.AnalysisGate,
-		audit:        cfg.Audit,
-		ckUser:       cfg.CKUser,
-		ckPass:       cfg.CKPass,
-		now:          now,
+		auth:   cfg.Auth,
+		ck:     cfg.CK,
+		gate:   cfg.Gate,
+		audit:  cfg.Audit,
+		ckUser: cfg.CKUser,
+		ckPass: cfg.CKPass,
+		now:    now,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.handleHealth)
@@ -97,7 +94,7 @@ func (s *Server) withAudit(next http.Handler) http.Handler {
 		next.ServeHTTP(rw, r.WithContext(auditlog.WithRecord(r.Context(), rec)))
 		rec.SetHTTPStatus(rw.status)
 		rec.SetDuration(time.Since(started))
-		if q, ok := s.gateFor(r.URL.Path).(*queue.FIFO); ok {
+		if q, ok := s.gate.(*queue.FIFO); ok {
 			inFlight, depth := q.Snapshot()
 			rec.SetQueueSnapshot(inFlight, depth)
 		}
@@ -156,13 +153,6 @@ func (s *Server) requireInternal(w http.ResponseWriter, r *http.Request) bool {
 	return false
 }
 
-func (s *Server) gateFor(path string) backend.Gate {
-	if strings.HasPrefix(path, "/v1/cklogs/analysis/") && s.analysisGate != nil {
-		return s.analysisGate
-	}
-	return s.gate
-}
-
 func (s *Server) runCklogs(w http.ResponseWriter, r *http.Request, op func(ctx context.Context) error) bool {
 	rec := auditlog.From(r.Context())
 	waitStart := time.Now()
@@ -179,7 +169,7 @@ func (s *Server) runCklogs(w http.ResponseWriter, r *http.Request, op func(ctx c
 		defer cancel()
 		return op(ctx)
 	}
-	gate := s.gateFor(r.URL.Path)
+	gate := s.gate
 	if gate == nil {
 		if err := bounded(r.Context()); err != nil {
 			if rec != nil {
@@ -191,7 +181,7 @@ func (s *Server) runCklogs(w http.ResponseWriter, r *http.Request, op func(ctx c
 		return true
 	}
 	err := gate.Run(r.Context(), bounded)
-	if rec != nil {
+	if rec != nil && err != nil {
 		rec.SetQueueWait(time.Since(waitStart))
 	}
 	if err == nil {

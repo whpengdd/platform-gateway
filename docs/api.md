@@ -84,6 +84,10 @@ curl -sS -X POST "$GW/v1/cklogs/analysis/delivery" \
 | 403 `token_scope_forbidden` | token 有效但是外网档，不能打 `analysis/*` |
 | 403 `forbidden` | 配了 `GATEWAY_ALLOW_CIDRS` 且来源 IP 不在范围内 |
 | 400 | JSON 字段不在白名单，或缺 `account` / `tid` 等 |
+| 503 `gateway_busy` | 共享 Kibana 队列已满，附带 `Retry-After`（秒） |
+| 503 `gateway_queue_timeout` | 等待共享 Kibana 队列超时 |
+
+自助与内部分析接口共享并发上限和 FIFO 等待队列。容器环境变量 `CKLOGS_MAX_CONCURRENCY`（默认 2）、`CKLOGS_QUEUE_SIZE`（默认 32）、`CKLOGS_QUEUE_WAIT_MS`（默认 30000）控制并发数、等待容量和最长排队时间。请求取消时退出队列，执行超时从取得并发槽后起算；多容器分别计数。
 
 ---
 

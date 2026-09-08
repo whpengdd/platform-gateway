@@ -189,7 +189,7 @@ func TestQueueThirdWaitsFourthBusy(t *testing.T) {
 		w.Write([]byte(`{"responses":[{"hits":{"total":0,"hits":[]}}]}`))
 	})
 	ts, _ := setupAPI(t, kibana, 2, 1, 5*time.Second)
-	body := `{"direction":"outbound","account":"a@b.com","timeRange":{"from":"2026-08-01T00:00:00.000Z","to":"2026-08-02T00:00:00.000Z"}}`
+	body := `{"direction":"outbound","account":"a@b.com","peer":"x@y.com","timeRange":{"from":"2026-08-01T00:00:00.000Z","to":"2026-08-02T00:00:00.000Z"}}`
 
 	var wg sync.WaitGroup
 	type result struct {
@@ -255,7 +255,7 @@ func TestQueueWaitTimeout(t *testing.T) {
 		w.Write([]byte(`{"responses":[{"hits":{"total":0,"hits":[]}}]}`))
 	})
 	ts, hits := setupAPI(t, kibana, 1, 1, 60*time.Millisecond)
-	body := `{"direction":"outbound","account":"a@b.com","timeRange":{"from":"2026-08-01T00:00:00.000Z","to":"2026-08-02T00:00:00.000Z"}}`
+	body := `{"direction":"outbound","account":"a@b.com","peer":"x@y.com","timeRange":{"from":"2026-08-01T00:00:00.000Z","to":"2026-08-02T00:00:00.000Z"}}`
 
 	firstDone := make(chan struct{})
 	go func() {
@@ -283,7 +283,7 @@ func TestQueueWaitTimeout(t *testing.T) {
 
 func TestZeroHitAndTruncatedJSONHasEntriesArray(t *testing.T) {
 	ts, _ := setupAPI(t, emptyKibana(), 2, 32, time.Second)
-	res := doJSON(t, ts, http.MethodPost, "/v1/cklogs/delivery", testToken, `{"direction":"outbound","account":"a@b.com","timeRange":{"from":"2026-08-01T00:00:00.000Z","to":"2026-08-02T00:00:00.000Z"}}`)
+	res := doJSON(t, ts, http.MethodPost, "/v1/cklogs/delivery", testToken, `{"direction":"outbound","account":"a@b.com","peer":"x@y.com","timeRange":{"from":"2026-08-01T00:00:00.000Z","to":"2026-08-02T00:00:00.000Z"}}`)
 	raw, _ := io.ReadAll(res.Body)
 	res.Body.Close()
 	if res.StatusCode != 200 {
@@ -297,7 +297,7 @@ func TestZeroHitAndTruncatedJSONHasEntriesArray(t *testing.T) {
 		w.Write([]byte(`{"responses":[{"hits":{"total":501,"hits":[{"_source":{"tid":"T1","timestamp":100,"mailfrom":"a@b.com","to":"x@y.com","cmd":"local","result":"0"}}]}}]}`))
 	})
 	ts2, _ := setupAPI(t, trunc, 2, 32, time.Second)
-	res = doJSON(t, ts2, http.MethodPost, "/v1/cklogs/delivery", testToken, `{"direction":"outbound","account":"a@b.com","timeRange":{"from":"2026-08-01T00:00:00.000Z","to":"2026-08-02T00:00:00.000Z"}}`)
+	res = doJSON(t, ts2, http.MethodPost, "/v1/cklogs/delivery", testToken, `{"direction":"outbound","account":"a@b.com","peer":"x@y.com","timeRange":{"from":"2026-08-01T00:00:00.000Z","to":"2026-08-02T00:00:00.000Z"}}`)
 	raw, _ = io.ReadAll(res.Body)
 	res.Body.Close()
 	if !strings.Contains(string(raw), `"entries":[]`) {
@@ -363,7 +363,7 @@ func TestDeliveryHTTPGoldenSmoke(t *testing.T) {
 		w.Write([]byte(`{"responses":[{"hits":{"total":1,"hits":[{"_source":{"tid":"T1","mid":"M1","timestamp":100,"mailfrom":"a@b.com","to":"x@y.com","cmd":"remote","result":"0"}}]}}]}`))
 	})
 	ts, hits := setupAPI(t, kibana, 2, 32, time.Second)
-	res := doJSON(t, ts, http.MethodPost, "/v1/cklogs/delivery", testToken, `{"direction":"outbound","account":"a@b.com","timeRange":{"from":"2026-08-01T00:00:00.000Z","to":"2026-08-02T00:00:00.000Z"}}`)
+	res := doJSON(t, ts, http.MethodPost, "/v1/cklogs/delivery", testToken, `{"direction":"outbound","account":"a@b.com","peer":"x@y.com","timeRange":{"from":"2026-08-01T00:00:00.000Z","to":"2026-08-02T00:00:00.000Z"}}`)
 	if res.StatusCode != 200 {
 		t.Fatalf("status=%d", res.StatusCode)
 	}
@@ -443,12 +443,12 @@ func TestAuditJSONLRecordsRequestAndKibanaCall(t *testing.T) {
 	})
 	ts := httptest.NewServer(h)
 	t.Cleanup(ts.Close)
-	res := doJSON(t, ts, http.MethodPost, "/v1/cklogs/delivery", testToken, `{"direction":"outbound","account":"a@b.com","subject":"secret-subject","timeRange":{"from":"2026-08-01T00:00:00.000Z","to":"2026-08-02T00:00:00.000Z"}}`)
+	res := doJSON(t, ts, http.MethodPost, "/v1/cklogs/delivery", testToken, `{"direction":"outbound","account":"a@b.com","peer":"x@y.com","subject":"secret-subject","timeRange":{"from":"2026-08-01T00:00:00.000Z","to":"2026-08-02T00:00:00.000Z"}}`)
 	if res.StatusCode != 200 {
 		t.Fatalf("status=%d", res.StatusCode)
 	}
 	readMap(t, res)
-	res = doJSON(t, ts, http.MethodPost, "/v1/cklogs/delivery", "", `{"direction":"outbound","account":"a@b.com"}`)
+	res = doJSON(t, ts, http.MethodPost, "/v1/cklogs/delivery", "", `{"direction":"outbound","account":"a@b.com","peer":"x@y.com"}`)
 	if res.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("unauth=%d", res.StatusCode)
 	}
@@ -515,13 +515,12 @@ func setupClassAPI(t *testing.T, kibana http.Handler) *httptest.Server {
 		HTTPClient: up.Client(),
 	}
 	h := New(Config{
-		Auth:         auth.NewWithClasses([]string{testToken}, []string{internalToken}, nil),
-		CK:           cklogs.NewService(client),
-		Gate:         queue.New("cklogs-selfservice", 2, 32, time.Second),
-		AnalysisGate: queue.New("cklogs-factory", 2, 32, time.Second),
-		CKUser:       "u",
-		CKPass:       "p",
-		Now:          frozenNow,
+		Auth:   auth.NewWithClasses([]string{testToken}, []string{internalToken}, nil),
+		CK:     cklogs.NewService(client),
+		Gate:   queue.New("cklogs", 2, 32, time.Second),
+		CKUser: "u",
+		CKPass: "p",
+		Now:    frozenNow,
 	})
 	ts := httptest.NewServer(h)
 	t.Cleanup(ts.Close)
@@ -556,7 +555,7 @@ func TestInternalTokenAnalysisDomainOnly(t *testing.T) {
 
 func TestInternalTokenCanCallSelfServiceDelivery(t *testing.T) {
 	ts := setupClassAPI(t, emptyKibana())
-	body := `{"direction":"outbound","account":"a@b.com","timeRange":{"from":"2026-08-01T00:00:00.000Z","to":"2026-08-02T00:00:00.000Z"}}`
+	body := `{"direction":"outbound","account":"a@b.com","peer":"x@y.com","timeRange":{"from":"2026-08-01T00:00:00.000Z","to":"2026-08-02T00:00:00.000Z"}}`
 	res := doJSON(t, ts, http.MethodPost, "/v1/cklogs/delivery", internalToken, body)
 	if res.StatusCode != http.StatusOK {
 		t.Fatalf("status=%d", res.StatusCode)

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -24,8 +25,9 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	gate := queue.New("cklogs-selfservice", cfg.maxConc, cfg.queueSize, cfg.queueWait)
-	analysisGate := queue.New("cklogs-factory", cfg.maxConc, cfg.queueSize, cfg.queueWait)
+	// All routes share the same Kibana budget, including internal analysis calls.
+	gate := queue.New("cklogs", cfg.maxConc, cfg.queueSize, cfg.queueWait)
+	log.Printf("Kibana queue: max_concurrency=%d queue_size=%d wait_timeout=%s", cfg.maxConc, cfg.queueSize, cfg.queueWait)
 	client := &cklogs.Client{
 		BaseURL:    cfg.ckBase,
 		User:       cfg.ckUser,
@@ -43,13 +45,12 @@ func main() {
 		log.Printf("audit jsonl dir %s", cfg.logDir)
 	}
 	handler := httpapi.New(httpapi.Config{
-		Auth:         auth.NewWithClasses(cfg.externalTokens, cfg.internalTokens, cfg.cidrs),
-		CK:           cklogs.NewService(client),
-		Gate:         gate,
-		AnalysisGate: analysisGate,
-		Audit:        audit,
-		CKUser:       cfg.ckUser,
-		CKPass:       cfg.ckPass,
+		Auth:   auth.NewWithClasses(cfg.externalTokens, cfg.internalTokens, cfg.cidrs),
+		CK:     cklogs.NewService(client),
+		Gate:   gate,
+		Audit:  audit,
+		CKUser: cfg.ckUser,
+		CKPass: cfg.ckPass,
 	})
 	srv := &http.Server{
 		Addr:              cfg.listen,
@@ -107,6 +108,21 @@ type config struct {
 }
 
 func loadConfig() (config, error) {
+	maxConc, err := envIntMin("CKLOGS_MAX_CONCURRENCY", 2, 1)
+	if err != nil {
+		return config{}, err
+	}
+	queueSize, err := envIntMin("CKLOGS_QUEUE_SIZE", 32, 0)
+	if err != nil {
+		return config{}, err
+	}
+	queueWaitMS, err := envIntMin("CKLOGS_QUEUE_WAIT_MS", 30000, 1)
+	if err != nil {
+		return config{}, err
+	}
+	if int64(queueWaitMS) > int64((1<<63-1)/time.Millisecond) {
+		return config{}, fmt.Errorf("CKLOGS_QUEUE_WAIT_MS exceeds the supported duration")
+	}
 	cidrs, err := auth.ParseCIDRs(os.Getenv("GATEWAY_ALLOW_CIDRS"))
 	if err != nil {
 		return config{}, err
@@ -127,9 +143,9 @@ func loadConfig() (config, error) {
 		ckPass:         strings.TrimSpace(os.Getenv("CK_LOGS_BASIC_PASS")),
 		ckIndex:        envOr("CK_LOGS_INDEX", "mtatrans_distributed"),
 		ckTimeout:      time.Duration(envInt("CK_LOGS_TIMEOUT_MS", 60000)) * time.Millisecond,
-		maxConc:        envInt("CKLOGS_MAX_CONCURRENCY", 2),
-		queueSize:      envInt("CKLOGS_QUEUE_SIZE", 32),
-		queueWait:      time.Duration(envInt("CKLOGS_QUEUE_WAIT_MS", 30000)) * time.Millisecond,
+		maxConc:        maxConc,
+		queueSize:      queueSize,
+		queueWait:      time.Duration(queueWaitMS) * time.Millisecond,
 	}, nil
 }
 
@@ -161,4 +177,16 @@ func envInt(key string, def int) int {
 		return def
 	}
 	return n
+}
+
+func envIntMin(key string, def, min int) (int, error) {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return def, nil
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < min {
+		return 0, fmt.Errorf("%s must be an integer >= %d", key, min)
+	}
+	return n, nil
 }
