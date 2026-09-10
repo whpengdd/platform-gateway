@@ -715,6 +715,31 @@ func TestQuerySelfServiceDeliveryLog_subjectAndDomainAreLocalFilters(t *testing.
 	}
 }
 
+func TestQuerySelfServiceDeliveryLog_countOnlyDoesNotFetchHits(t *testing.T) {
+	input := testInput()
+	input.CountOnly = true
+	svc, n := newService(t, func(w http.ResponseWriter, r *http.Request) {
+		body := readBody(r)
+		if !strings.Contains(body, `"size":0`) {
+			t.Errorf("count body must use size 0: %s", body)
+		}
+		if strings.Contains(body, `"sort"`) {
+			t.Errorf("count body must not sort: %s", body)
+		}
+		w.Write(hitsBodyTotal(3, nil))
+	})
+	out := svc.QuerySelfServiceDelivery(context.Background(), input)
+	if out.Status != "ok" || out.Total == nil || *out.Total != 3 {
+		t.Fatalf("%+v", out)
+	}
+	if len(out.Entries) != 0 {
+		t.Fatalf("entries=%v", out.Entries)
+	}
+	if atomic.LoadInt32(n) != 1 {
+		t.Fatalf("calls=%d want 1 (DA count only)", *n)
+	}
+}
+
 func TestQuerySelfServiceDeliveryLog_datransTruncated(t *testing.T) {
 	input := testInput()
 	svc, _ := newService(t, func(w http.ResponseWriter, r *http.Request) {

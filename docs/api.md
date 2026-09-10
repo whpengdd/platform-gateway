@@ -116,7 +116,7 @@ curl -sS -X POST "$GW/v1/cklogs/analysis/delivery" \
 
 | 方法 | 路径 | 对应工具 | 条件 |
 |---|---|---|---|
-| POST | `/v1/cklogs/analysis/delivery` | `query_delivery_log` | `direction` 可 `both`；`sender` / `recipient` / `domain` / `subject` / `msgId` / `timeRange` / `countOnly`。不要求账号，不校验授权域 |
+| POST | `/v1/cklogs/analysis/delivery` | `query_delivery_log` | `direction` 可 `both`；`sender` / `recipient` / `domain` / `subject` / `msgId` / `timeRange` / `countOnly`。不要求账号，不校验授权域。`countOnly` 只返回 hits.total，不拉明细 |
 | POST | `/v1/cklogs/analysis/auth` | `query_auth_log` | `account`、`protocol`=`pop3`\|`smtp`\|`webmail`\|`imap`、`timeRange`、`countOnly`。imap → `not_available` |
 | POST | `/v1/cklogs/analysis/ops` | `query_mail_ops_log` | `account`、`protocol`=`webmail`\|`pop3`\|`imap`、`op`、`timeRange`、`countOnly` |
 | POST | `/v1/cklogs/message` | `query_delivery_trace` | 与自助同一 URL |

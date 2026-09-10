@@ -28,25 +28,41 @@ func (s *Service) QuerySelfServiceDelivery(ctx context.Context, in DeliveryQuery
 		pageSize = HardSize
 	}
 	if in.CountOnly {
-		fullIn := in
-		fullIn.CountOnly = false
-		fullIn.Page = 1
-		fullIn.PageSize = HardSize
-		full := s.QuerySelfServiceDelivery(ctx, fullIn)
-		if full.Status != "ok" {
-			full.Page = page
-			full.PageSize = pageSize
-			return full
+		da := s.Client.Query(ctx, Filters{
+			Sender:    derived.Sender,
+			Recipient: derived.Recipient,
+			TimeRange: in.TimeRange,
+		}, QueryOptions{Dataset: "delivery_agent", CountOnly: true})
+		if !da.OK {
+			msg := "DATRANS 查询失败：" + da.Message
+			if da.ErrorKind == "timeout" {
+				msg = timeoutMessage()
+			}
+			return deliveryError(ckLogsCode(da.ErrorKind), msg, nil)
 		}
-		lim := append([]string{}, full.Limitations...)
-		lim = append(lim, "本次为计数查询（countOnly），只返回聚合后的准确总数、不含明细。")
-		full.Entries = []Entry{}
-		full.Limitations = lim
-		full.CountOnly = ptrBool(true)
-		full.Page = page
-		full.PageSize = pageSize
-		full.HasMore = ptrBool(false)
-		return full
+		total := da.Total
+		if total == 0 {
+			mta := s.Client.Query(ctx, Filters{
+				Sender:    derived.Sender,
+				Recipient: derived.Recipient,
+				TimeRange: in.TimeRange,
+			}, QueryOptions{CountOnly: true})
+			if !mta.OK {
+				return mtaFailure(mta)
+			}
+			total = mta.Total
+		}
+		return DeliveryResult{
+			Status:      "ok",
+			Provider:    "log_platform",
+			Total:       ptrInt(total),
+			Entries:     []Entry{},
+			Limitations: []string{"本次为计数查询（countOnly），只返回命中总数、不含明细。"},
+			CountOnly:   ptrBool(true),
+			Page:        page,
+			PageSize:    pageSize,
+			HasMore:     ptrBool(false),
+		}
 	}
 
 	da := s.Client.Query(ctx, Filters{
