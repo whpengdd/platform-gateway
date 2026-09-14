@@ -29,7 +29,7 @@ type Client struct {
 }
 
 func (c *Client) Configured() bool {
-	return c != nil && strings.TrimSpace(c.User) != "" && strings.TrimSpace(c.Pass) != ""
+	return c != nil && c.User != "" && c.Pass != ""
 }
 
 func (c *Client) http() *http.Client {
@@ -55,7 +55,7 @@ func (c *Client) baseURL() string {
 }
 
 func (c *Client) index() string {
-	idx := strings.TrimSpace(c.Index)
+	idx := c.Index
 	if idx == "" {
 		return defaultIndex
 	}

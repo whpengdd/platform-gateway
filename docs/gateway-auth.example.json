@@ -1,4 +1,12 @@
 {
+  "server": {
+    "listenAddr": ":8091",
+    "allowCidrs": []
+  },
+  "audit": {
+    "enabled": true,
+    "dir": "/var/log/platform-gateway"
+  },
   "tokens": [
     {
       "token": "<ck-external-token>",
@@ -23,6 +31,11 @@
     }
   ],
   "jira": {
+    "baseUrl": "https://jira.example.com/jira",
+    "auth": {
+      "type": "bearer",
+      "token": "<jira-upstream-token>"
+    },
     "projects": {
       "CS": {
         "filterJql": "labels = zammad",
@@ -48,6 +61,21 @@
         ]
       },
       "IT": {}
+    }
+  },
+  "cklogs": {
+    "baseUrl": "https://ck-logs.icoremail.net",
+    "auth": {
+      "type": "basic",
+      "username": "<user>",
+      "password": "<password>"
+    },
+    "index": "mtatrans_distributed",
+    "timeoutMs": 60000,
+    "queue": {
+      "maxConcurrency": 2,
+      "size": 32,
+      "waitTimeoutMs": 30000
     }
   }
 }

@@ -19,7 +19,7 @@ import (
 
 func fixture(t *testing.T, h http.HandlerFunc) (*Server, *auth.Checker) {
 	t.Helper()
-	f, err := config.Parse([]byte(`{"tokens":[{"token":"jira-a","jiraProjects":["CS"]},{"token":"jira-b","jiraProjects":["CS","IT"]},{"token":"ck-a","cklogs":"external"},{"token":"ck-b","cklogs":"internal"}],"jira":{"projects":{"CS":{"filterJql":"labels = zammad","issueTypeId":"10","createDefaults":{"labels":["zammad"]},"createFields":["summary","description","customfield_1"],"readFields":["summary","reporter","customfield_1"]},"IT":{}}}}`))
+	f, err := config.Parse([]byte(`{"cklogs":{"auth":{"type":"basic","username":"user","password":"pass"}},"tokens":[{"token":"jira-a","jiraProjects":["CS"]},{"token":"jira-b","jiraProjects":["CS","IT"]},{"token":"ck-a","cklogs":"external"},{"token":"ck-b","cklogs":"internal"}],"jira":{"baseUrl":"https://jira.example.test/context","auth":{"type":"bearer","token":"upstream"},"projects":{"CS":{"filterJql":"labels = zammad","issueTypeId":"10","createDefaults":{"labels":["zammad"]},"createFields":["summary","description","customfield_1"],"readFields":["summary","reporter","customfield_1"]},"IT":{}}}}`))
 	if err != nil {
 		t.Fatal(err)
 	}

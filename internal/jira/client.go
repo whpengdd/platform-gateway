@@ -42,11 +42,11 @@ type Client struct {
 func NewClient(base, bearer, user, pass string) (*Client, error) {
 	u, err := url.Parse(base)
 	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.RawPath != "" || strings.ContainsAny(u.Path, "\\%") {
-		return nil, errors.New("invalid JIRA_BASE_URL")
+		return nil, errors.New("invalid jira.baseUrl")
 	}
 	for _, seg := range strings.Split(u.Path, "/") {
 		if seg == "." || seg == ".." {
-			return nil, errors.New("invalid JIRA_BASE_URL")
+			return nil, errors.New("invalid jira.baseUrl")
 		}
 	}
 	if (bearer != "") == (user != "" || pass != "") || bearer == "" && (user == "" || pass == "") || strings.ContainsAny(bearer+user+pass, "\r\n") {

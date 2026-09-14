@@ -7,8 +7,8 @@ import sys
 import tempfile
 import uuid
 repo=pathlib.Path(__file__).resolve().parents[2]
-context=sys.argv[1] if len(sys.argv)>1 else 'colima'
-docker=['docker','--context',context]
+context=sys.argv[1] if len(sys.argv)>1 else '-'
+docker=['docker'] + (['--context',context] if context != '-' else [])
 tag='platform-gateway:context-smoke-'+uuid.uuid4().hex[:8]
 with tempfile.TemporaryDirectory(prefix='gateway-build-smoke-') as tmp:
     root=pathlib.Path(tmp)

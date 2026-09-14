@@ -1,6 +1,6 @@
 # platform-gateway
 
-Coremail cklogs 与项目范围 Jira 中转。Go 程序默认监听 :8091；部署脚本和容器宿主端口绑定 127.0.0.1:8091。浏览器和 nginx 公网不直连。
+Coremail cklogs 与项目范围 Jira 中转。Go 程序默认监听 :8091；宿主示例及容器宿主端口绑定 127.0.0.1:8091。浏览器和 nginx 公网不直连。
 
 客户：
 
@@ -11,7 +11,7 @@ HTTP 合同见 [docs/api.md](docs/api.md)。未知字段 400。外网 token 打 
 
 Zammad → Jira 的 [调用清单与安全设计](docs/jira-bridge-design.md) 和 [调用方 API 接口文档](docs/jira-api.md) 已整理：通过 [统一 token 配置文件](docs/gateway-auth.md) 管理 cklogs 两档权限与 Jira 项目授权（默认 `./config.json`，容器通过文件挂载提供），支持多 token、多项目；业务接口按项目隔离并支持可选 JQL 过滤，同步逻辑由调用方负责（本仓接口已实现；Zammad 适配与生产接入另行实施）。
 
-本仓负责 **编镜像 / 编 151 二进制并拉起进程**。入站 token 由运维维护在 config.json；调用方仓库的旧 token 配对脚本未修改，不能向新版注入旧环境变量。
+本仓负责 **编镜像 / 编 151 二进制并拉起进程**。入站 token 由运维维护在 config.json；调用方仓库的旧 token 配对脚本未修改，新版忽略残留旧应用变量，应用设置只读 JSON。
 
 镜像名保持 `rag-explorer-ai-platform-gateway:<VERSION>`（`VERSION` 文件）。rag-explorer-ai compose 钉这个 tag，不再 `build` 本仓源码。
 
@@ -25,7 +25,7 @@ go test ./...
 go build -buildvcs=false -o bin/platform-gateway ./cmd/gateway
 ```
 
-本地 Docker（本仓可以 `--build`）：
+先按 [完整配置说明](docs/gateway-auth.md) 准备 config.json 和可写审计挂载目录。本地 Docker（本仓可以 `--build`）：
 
 ```bash
 docker compose up -d --build
@@ -38,21 +38,15 @@ curl -sf http://127.0.0.1:8091/health
 
 所有 `/v1/cklogs/*` 接口（包括自助和内部 `analysis/*`）共用一个进程内 FIFO 队列。每个执行中的业务请求占用一个槽，其内部 Kibana HTTP 调用串行执行，因此同时调用 Kibana 的数量不会超过配置上限。
 
-在本仓 `.env` 中配置，Docker Compose 会将以下环境变量传入容器：
+在 `config.json` 的 `cklogs.queue` 中配置：
 
-```dotenv
-CKLOGS_MAX_CONCURRENCY=2
-CKLOGS_QUEUE_SIZE=32
-CKLOGS_QUEUE_WAIT_MS=30000
+```json
+{"maxConcurrency": 2, "size": 32, "waitTimeoutMs": 30000}
 ```
 
-- `CKLOGS_MAX_CONCURRENCY`：共享并发上限，默认 2，必须大于 0。
-- `CKLOGS_QUEUE_SIZE`：额外等待的请求数，默认 32；设为 0 时无空闲槽即拒绝。
-- `CKLOGS_QUEUE_WAIT_MS`：最长排队时间（毫秒），默认 30000，必须大于 0。请求取消时退出队列；执行超时从取得槽后开始计算。
+`maxConcurrency` 必须 >= 1；`size` 可以为 0，表示无等待位；`waitTimeoutMs` 是正整数毫秒。只有缺失字段采用上述默认值，显式非法值启动失败。请求取消时退出队列；执行超时从取得槽后开始计算。
 
-队列满返回 HTTP 503 `gateway_busy`，附带 `Retry-After`；排队超时返回 HTTP 503 `gateway_queue_timeout`。这三个变量为空时使用默认值，非法值会导致启动失败。
-
-修改配置后运行 `docker compose up -d --build`，重建并应用环境变量。直接使用 `docker run` 时通过 `-e CKLOGS_MAX_CONCURRENCY=2` 等参数传入；使用其他仓库的 Compose 部署时，也需在对应服务中传入这些变量。
+队列满返回 HTTP 503 `gateway_busy`，附带 `Retry-After`；排队超时返回 HTTP 503 `gateway_queue_timeout`。文件修改后重启进程或 `docker compose up -d --force-recreate --no-deps platform-gateway`，无需重新构建镜像。
 
 限制按容器/进程独立计算：多个实例的总并发上限为各实例配置之和。
 
@@ -88,9 +82,9 @@ bash scripts/deploy/update-public.sh --app-root /path/to/rag-explorer-ai
 
 ## Jira 与文件配置
 
-启动前按 [配置示例](docs/gateway-auth.example.json) 准备 config.json，替换占位符，并确保 UID 65532 可读。默认读取 ./config.json；容器工作目录 /，文件只读挂载为 /config.json。只有启用的服务才要求相应上游凭据；旧入站 token 环境变量非空即拒绝启动。
+启动前按 [配置示例](docs/gateway-auth.example.json) 准备 config.json，替换占位符，并确保 UID 65532 可读。默认读取 ./config.json；容器工作目录 /，文件只读挂载为 /config.json。只有启用的服务才要求相应上游凭据；残留旧应用环境变量不参与配置或授权，也不阻止启动。
 
-修改宿主文件后执行 docker compose up -d --force-recreate --no-deps platform-gateway，重新绑定当前文件，无需重建镜像。裸机默认 app-root/config.json，可用 GATEWAY_AUTH_FILE 或 standalone 的 --auth-file 覆盖。app-stack 脚本通过临时 Compose override 挂载文件，不修改调用方仓库。
+修改宿主文件后执行 docker compose up -d --force-recreate --no-deps platform-gateway，重新绑定当前文件，无需重建镜像。裸机默认 app-root/config.json，可用 GATEWAY_CONFIG_FILE 或 standalone 的 --config-file 覆盖。app-stack 脚本通过临时 Compose override 挂载文件，不修改调用方仓库。
 
 Jira 使用独立的 2 执行槽、32 等待位 FIFO，排队及操作各 30 秒。每项目读取 60 次/分钟、写入 20 次/分钟、创建 100 次/UTC日、上传 200 MiB/UTC日。额度按进程计算，同项目多 token 共享，重启清零。同步、业务绑定和不确定写入的恢复由调用方负责。
 

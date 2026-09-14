@@ -5,30 +5,15 @@ services:
     image: rag-explorer-ai-platform-gateway:${PLATFORM_GATEWAY_TAG:-1.0.0}
     working_dir: /
     ports:
-      - "127.0.0.1:8091:8091"
+      - "127.0.0.1:${PLATFORM_GATEWAY_HOST_PORT:-8091}:${PLATFORM_GATEWAY_CONTAINER_PORT:-8091}"
     env_file:
       - path: .env
         required: false
     environment:
-      LISTEN_ADDR: ":8091"
-      GATEWAY_ALLOW_CIDRS: ${GATEWAY_ALLOW_CIDRS:-}
-      JIRA_BASE_URL: ${JIRA_BASE_URL:-}
-      JIRA_API_TOKEN: ${JIRA_API_TOKEN:-}
-      JIRA_BASIC_USER: ${JIRA_BASIC_USER:-}
-      JIRA_BASIC_PASSWORD: ${JIRA_BASIC_PASSWORD:-}
-      CK_LOGS_BASE_URL: ${CK_LOGS_BASE_URL:-https://ck-logs.icoremail.net}
-      CK_LOGS_BASIC_USER: ${CK_LOGS_BASIC_USER:-}
-      CK_LOGS_BASIC_PASS: ${CK_LOGS_BASIC_PASS:-}
-      CK_LOGS_INDEX: ${CK_LOGS_INDEX:-mtatrans_distributed}
-      # One shared Kibana queue for self-service and analysis routes.
-      CKLOGS_MAX_CONCURRENCY: ${CKLOGS_MAX_CONCURRENCY:-2}
-      CKLOGS_QUEUE_SIZE: ${CKLOGS_QUEUE_SIZE:-32}
-      CKLOGS_QUEUE_WAIT_MS: ${CKLOGS_QUEUE_WAIT_MS:-30000}
-      CK_LOGS_TIMEOUT_MS: ${CK_LOGS_TIMEOUT_MS:-60000}
-      GATEWAY_LOG_DIR: /var/log/platform-gateway
+      GATEWAY_CONFIG_FILE: /config.json
     volumes:
       - type: bind
-        source: ${PLATFORM_GATEWAY_AUTH_HOST_FILE:-./config.json}
+        source: ${PLATFORM_GATEWAY_CONFIG_HOST_FILE:-./config.json}
         target: /config.json
         read_only: true
         bind:

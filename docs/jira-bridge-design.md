@@ -71,7 +71,7 @@ flowchart LR
 
 ## 4. 配置与属性过滤
 
-默认读取工作目录的 `./config.json`，统一配置 cklogs token、Jira token 和项目规则；容器通过宿主文件挂载，外部修改后重新创建容器生效。可选 GATEWAY_AUTH_FILE 仅覆盖路径，token 不通过环境变量传入。
+默认读取工作目录的 `./config.json`，统一配置 cklogs token、Jira token 和项目规则；容器通过宿主文件挂载，外部修改后重新创建容器生效。可选 GATEWAY_CONFIG_FILE 仅覆盖路径，token 不通过环境变量传入。
 
 项目规则集中在 jira.projects，以 filterJql/createDefaults 配置，不再使用本地 filters/equals。完整示例见 [统一配置](gateway-auth.md)；首版示例 labels 条件不代表 CS 必填字段已完成验证。
 

@@ -16,7 +16,7 @@ import (
 )
 
 func TestJiraTokensRejectedByEveryCKRoute(t *testing.T) {
-	f, err := config.Parse([]byte(`{"tokens":[{"token":"jira","jiraProjects":["CS"]}],"jira":{"projects":{"CS":{}}}}`))
+	f, err := config.Parse([]byte(`{"cklogs":{"auth":{"type":"basic","username":"user","password":"pass"}},"tokens":[{"token":"jira","jiraProjects":["CS"]}],"jira":{"baseUrl":"https://jira.example.test/context","auth":{"type":"bearer","token":"upstream"},"projects":{"CS":{}}}}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -38,7 +38,7 @@ func TestJiraTokensRejectedByEveryCKRoute(t *testing.T) {
 }
 
 func TestJiraAuditRedaction(t *testing.T) {
-	f, err := config.Parse([]byte(`{"tokens":[{"token":"jira-secret","jiraProjects":["CS"]}],"jira":{"projects":{"CS":{}}}}`))
+	f, err := config.Parse([]byte(`{"cklogs":{"auth":{"type":"basic","username":"user","password":"pass"}},"tokens":[{"token":"jira-secret","jiraProjects":["CS"]}],"jira":{"baseUrl":"https://jira.example.test/context","auth":{"type":"bearer","token":"upstream"},"projects":{"CS":{}}}}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +78,7 @@ func TestJiraAuditRedaction(t *testing.T) {
 }
 
 func TestCKQueueDoesNotBlockJira(t *testing.T) {
-	f, err := config.Parse([]byte(`{"tokens":[{"token":"jira-token","jiraProjects":["CS"]},{"token":"ck-token","cklogs":"internal"}],"jira":{"projects":{"CS":{}}}}`))
+	f, err := config.Parse([]byte(`{"cklogs":{"auth":{"type":"basic","username":"user","password":"pass"}},"tokens":[{"token":"jira-token","jiraProjects":["CS"]},{"token":"ck-token","cklogs":"internal"}],"jira":{"baseUrl":"https://jira.example.test/context","auth":{"type":"bearer","token":"upstream"},"projects":{"CS":{}}}}`))
 	if err != nil {
 		t.Fatal(err)
 	}
