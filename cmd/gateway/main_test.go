@@ -1,12 +1,15 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
 
 func TestLoadConfigQueue(t *testing.T) {
+	setupConfig(t)
 	for _, key := range []string{"CKLOGS_MAX_CONCURRENCY", "CKLOGS_QUEUE_SIZE", "CKLOGS_QUEUE_WAIT_MS", "GATEWAY_ALLOW_CIDRS"} {
 		t.Setenv(key, "")
 	}
@@ -30,6 +33,7 @@ func TestLoadConfigQueue(t *testing.T) {
 }
 
 func TestLoadConfigRejectsInvalidQueue(t *testing.T) {
+	setupConfig(t)
 	for _, key := range []string{"CKLOGS_MAX_CONCURRENCY", "CKLOGS_QUEUE_SIZE", "CKLOGS_QUEUE_WAIT_MS", "GATEWAY_ALLOW_CIDRS"} {
 		t.Setenv(key, "")
 	}
@@ -52,5 +56,50 @@ func TestLoadConfigRejectsInvalidQueue(t *testing.T) {
 				t.Fatalf("expected error identifying %s, got %v", tt.key, err)
 			}
 		})
+	}
+}
+
+func setupConfig(t *testing.T) {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(p, []byte(`{"tokens":[{"token":"test-credential","cklogs":"external"}]}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GATEWAY_AUTH_FILE", p)
+	for _, k := range []string{"GATEWAY_TOKEN_EXTERNAL", "GATEWAY_TOKEN_INTERNAL", "GATEWAY_AUTH_TOKENS", "GATEWAY_JIRA_TOKENS", "GATEWAY_JIRA_TOKENS_FILE"} {
+		t.Setenv(k, "")
+	}
+	t.Setenv("CK_LOGS_BASIC_USER", "test")
+	t.Setenv("CK_LOGS_BASIC_PASS", "test")
+}
+func TestEnabledServices(t *testing.T) {
+	setupConfig(t)
+	t.Setenv("JIRA_BASE_URL", "")
+	t.Setenv("JIRA_API_TOKEN", "")
+	if _, err := loadConfig(); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CK_LOGS_BASIC_PASS", "")
+	if _, err := loadConfig(); err == nil {
+		t.Fatal("missing CK accepted")
+	}
+	if err := os.WriteFile(os.Getenv("GATEWAY_AUTH_FILE"), []byte(`{"tokens":[{"token":"jira-test","jiraProjects":["CS"]}],"jira":{"projects":{"CS":{}}}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadConfig(); err == nil {
+		t.Fatal("missing Jira accepted")
+	}
+	t.Setenv("JIRA_BASE_URL", "https://jira.example.test/context")
+	t.Setenv("JIRA_API_TOKEN", "upstream")
+	t.Setenv("JIRA_BASIC_USER", "")
+	t.Setenv("JIRA_BASIC_PASSWORD", "")
+	t.Setenv("CKLOGS_MAX_CONCURRENCY", "invalid-but-disabled")
+	cfg, err := loadConfig()
+	if err != nil || cfg.jiraClient == nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GATEWAY_TOKEN_INTERNAL", "secret")
+	if _, err := loadConfig(); err == nil {
+		t.Fatal("legacy accepted")
 	}
 }

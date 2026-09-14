@@ -12,6 +12,7 @@ MODE=""
 STACK="self"
 APP_ROOT=""
 ENV_FILE=""
+AUTH_FILE="${GATEWAY_AUTH_FILE:-}"
 LISTEN="127.0.0.1:8091"
 HEALTH_URL="http://127.0.0.1:8091/health"
 READY_URL="http://127.0.0.1:8091/ready"
@@ -26,6 +27,7 @@ while [[ $# -gt 0 ]]; do
     --mode) MODE="${2:-}"; shift 2 ;;
     --stack) STACK="${2:-}"; shift 2 ;;
     --app-root) APP_ROOT="${2:-}"; shift 2 ;;
+    --auth-file) AUTH_FILE="${2:-}"; shift 2 ;;
     --env-file) ENV_FILE="${2:-}"; shift 2 ;;
     --listen) LISTEN="${2:-}"; shift 2 ;;
     -h|--help) usage ;;
@@ -81,11 +83,13 @@ image_name() {
 start_host() {
   require_app_root
   ENV_FILE="${ENV_FILE:-$APP_ROOT/.env.local}"
+  AUTH_FILE="${AUTH_FILE:-$APP_ROOT/config.json}"
+  [[ -f "$AUTH_FILE" && -r "$AUTH_FILE" ]] || die "readable authorization file required"
   mkdir -p "$APP_ROOT/logs/platform-gateway" "$ROOT/bin"
   local go_bin=""
   if go_bin="$(resolve_go)"; then
     echo "building bin/platform-gateway"
-    ( cd "$ROOT" && "$go_bin" build -o bin/platform-gateway ./cmd/gateway )
+    ( cd "$ROOT" && "$go_bin" build -buildvcs=false -o bin/platform-gateway ./cmd/gateway )
   else
     echo "no go toolchain; extracting binary from docker image"
     local image
@@ -109,6 +113,7 @@ start_host() {
     --gateway-root "$ROOT" \
     --env-file "$ENV_FILE" \
     --listen "$LISTEN" \
+    --auth-file "$AUTH_FILE" \
     --binary "$ROOT/bin/platform-gateway")"
   echo "$pid" > "$pid_file"
   echo "started host gateway pid=$pid listen=$LISTEN"
@@ -117,6 +122,8 @@ start_host() {
 }
 
 start_docker_self() {
+  export PLATFORM_GATEWAY_AUTH_HOST_FILE="${AUTH_FILE:-$ROOT/config.json}"
+  [[ -f "$PLATFORM_GATEWAY_AUTH_HOST_FILE" && -r "$PLATFORM_GATEWAY_AUTH_HOST_FILE" ]] || die "readable authorization file required"
   mkdir -p "$ROOT/logs"
   docker compose --project-directory "$ROOT" -f "$ROOT/docker-compose.yml" up -d --build
   echo "started docker platform-gateway stack=self"
@@ -127,6 +134,12 @@ start_docker_app() {
   require_app_root
   local image
   image="$(bash "$HERE/build-image.sh")"
+  AUTH_FILE="${AUTH_FILE:-$APP_ROOT/config.json}"
+  [[ -f "$AUTH_FILE" && -r "$AUTH_FILE" ]] || die "readable authorization file required"
+  local overlay
+  overlay="$(mktemp)"
+  trap 'rm -f "$overlay"' RETURN
+  node "$HERE/compose-auth.mjs" "$STACK" "$AUTH_FILE" > "$overlay"
   export PLATFORM_GATEWAY_IMAGE="$image"
   echo "PLATFORM_GATEWAY_IMAGE=$PLATFORM_GATEWAY_IMAGE"
   mkdir -p "$APP_ROOT/logs/platform-gateway"
@@ -135,7 +148,7 @@ start_docker_app() {
       local compose="$APP_ROOT/install/docker-compose.yml"
       [[ -f "$compose" ]] || die "missing $compose"
       PLATFORM_GATEWAY_IMAGE="$image" docker compose --project-directory "$APP_ROOT/install" \
-        -f "$compose" --profile platform-gateway \
+        -f "$compose" -f "$overlay" --profile platform-gateway \
         up -d --no-build --force-recreate --no-deps platform-gateway
       ;;
     149)
@@ -143,7 +156,7 @@ start_docker_app() {
       [[ -f "$compose" ]] || die "missing $compose"
       PLATFORM_GATEWAY_IMAGE="$image" docker compose --project-directory "$APP_ROOT" \
         --project-name rag-explorer-ai \
-        -f "$compose" --profile platform-gateway \
+        -f "$compose" -f "$overlay" --profile platform-gateway \
         up -d --no-build --force-recreate --no-deps rag-explorer-platform-gateway
       ;;
   esac

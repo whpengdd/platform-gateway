@@ -4,8 +4,10 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"net"
 	"net/http"
+	"platform-gateway/internal/config"
 	"strings"
 )
 
@@ -18,8 +20,9 @@ const (
 )
 
 type tokenEntry struct {
-	sha   [32]byte
-	class Class
+	sha      [32]byte
+	class    Class
+	projects []string
 }
 
 type Checker struct {
@@ -188,6 +191,54 @@ func ipAllowed(ip net.IP, cidrs []*net.IPNet) bool {
 	for _, n := range cidrs {
 		if n.Contains(ip) {
 			return true
+		}
+	}
+	return false
+}
+
+// Principal carries one service domain; credentials are retained only as digests.
+type Principal struct {
+	Class       Class
+	Projects    []string
+	Fingerprint string
+}
+
+func NewFromFile(f *config.File, cidrs []*net.IPNet) *Checker {
+	c := &Checker{cidrs: cidrs}
+	for _, t := range f.Tokens {
+		c.entries = append(c.entries, tokenEntry{sha: sha256.Sum256([]byte(t.Token)), class: Class(t.CKLogs), projects: append([]string(nil), t.JiraProjects...)})
+	}
+	return c
+}
+func (c *Checker) Authenticate(r *http.Request) (Principal, int, string) {
+	status, code, _, _ := c.CheckClass(r)
+	if status != 0 {
+		return Principal{}, status, code
+	}
+	tok, _ := bearerToken(r.Header.Get("Authorization"))
+	sum := sha256.Sum256([]byte(tok))
+	var p Principal
+	for _, e := range c.entries {
+		if subtle.ConstantTimeCompare(sum[:], e.sha[:]) == 1 {
+			p = Principal{Class: e.class, Projects: append([]string(nil), e.projects...), Fingerprint: hex.EncodeToString(sum[:8])}
+		}
+	}
+	return p, 0, ""
+}
+func (p Principal) Allows(project string) bool {
+	for _, key := range p.Projects {
+		if key == project {
+			return true
+		}
+	}
+	return false
+}
+func (c *Checker) HasCKLogs() bool {
+	if c != nil {
+		for _, e := range c.entries {
+			if e.class != ClassNone {
+				return true
+			}
 		}
 	}
 	return false

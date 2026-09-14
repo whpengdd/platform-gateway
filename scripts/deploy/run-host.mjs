@@ -12,9 +12,11 @@ import { present, readEnvFile } from "./env-file.mjs";
 
 const GATEWAY_KEYS = [
   "LISTEN_ADDR",
-  "GATEWAY_TOKEN_EXTERNAL",
-  "GATEWAY_TOKEN_INTERNAL",
-  "GATEWAY_AUTH_TOKENS",
+  "GATEWAY_AUTH_FILE",
+  "JIRA_BASE_URL",
+  "JIRA_API_TOKEN",
+  "JIRA_BASIC_USER",
+  "JIRA_BASIC_PASSWORD",
   "GATEWAY_ALLOW_CIDRS",
   "GATEWAY_LOG_DIR",
   "CK_LOGS_BASE_URL",
@@ -25,18 +27,17 @@ const GATEWAY_KEYS = [
   "CKLOGS_QUEUE_SIZE",
   "CKLOGS_QUEUE_WAIT_MS",
   "CK_LOGS_TIMEOUT_MS",
-  "PLATFORM_GATEWAY_TOKEN",
-  "PLATFORM_GATEWAY_INTERNAL_TOKEN",
 ];
 
 function parseArgs(argv) {
-  const args = { appRoot: "", gatewayRoot: "", envFile: "", listen: "127.0.0.1:8091", binary: "" };
+  const args = { appRoot: "", gatewayRoot: "", envFile: "", listen: "127.0.0.1:8091", binary: "", authFile: "" };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === "--app-root") args.appRoot = String(argv[++i] || "");
     else if (arg === "--gateway-root") args.gatewayRoot = String(argv[++i] || "");
     else if (arg === "--env-file") args.envFile = String(argv[++i] || "");
     else if (arg === "--listen") args.listen = String(argv[++i] || "");
+    else if (arg === "--auth-file") args.authFile = String(argv[++i] || "");
     else if (arg === "--binary") args.binary = String(argv[++i] || "");
   }
   return args;
@@ -49,18 +50,12 @@ function buildChildEnv(fileEnv, listen, logDir) {
   }
   env.LISTEN_ADDR = listen;
   env.GATEWAY_LOG_DIR = env.GATEWAY_LOG_DIR || logDir;
-  if (!present(env, "GATEWAY_TOKEN_EXTERNAL") && present(fileEnv, "PLATFORM_GATEWAY_TOKEN")) {
-    env.GATEWAY_TOKEN_EXTERNAL = fileEnv.PLATFORM_GATEWAY_TOKEN;
+  for (const key of ["GATEWAY_TOKEN_EXTERNAL", "GATEWAY_TOKEN_INTERNAL", "GATEWAY_AUTH_TOKENS", "GATEWAY_JIRA_TOKENS", "GATEWAY_JIRA_TOKENS_FILE"]) {
+    if (String(fileEnv[key] || "") !== "" || String(env[key] || "") !== "") throw new Error("run-host: remove legacy gateway token environment; use config.json");
+    delete env[key];
   }
-  if (!present(env, "GATEWAY_TOKEN_INTERNAL") && present(fileEnv, "PLATFORM_GATEWAY_INTERNAL_TOKEN")) {
-    env.GATEWAY_TOKEN_INTERNAL = fileEnv.PLATFORM_GATEWAY_INTERNAL_TOKEN;
-  }
-  const hasToken = present(env, "GATEWAY_TOKEN_EXTERNAL")
-    || present(env, "GATEWAY_TOKEN_INTERNAL")
-    || present(env, "GATEWAY_AUTH_TOKENS");
-  if (!hasToken) {
-    throw new Error("run-host: no gateway token in env file; secret values not printed");
-  }
+  delete env.PLATFORM_GATEWAY_TOKEN;
+  delete env.PLATFORM_GATEWAY_INTERNAL_TOKEN;
   return env;
 }
 
@@ -74,6 +69,9 @@ function main() {
   const logDir = path.join(appRoot, "logs/platform-gateway");
   fs.mkdirSync(logDir, { recursive: true });
   const childEnv = buildChildEnv(readEnvFile(envFile), args.listen, logDir);
+  childEnv.GATEWAY_AUTH_FILE = path.resolve(appRoot, args.authFile || childEnv.GATEWAY_AUTH_FILE || "config.json");
+  if (!fs.statSync(childEnv.GATEWAY_AUTH_FILE).isFile()) throw new Error("run-host: authorization source must be a file");
+  fs.accessSync(childEnv.GATEWAY_AUTH_FILE, fs.constants.R_OK);
   const logFd = fs.openSync(path.join(appRoot, "gateway.log"), "a");
   const child = spawn(binary, [], {
     cwd: appRoot,

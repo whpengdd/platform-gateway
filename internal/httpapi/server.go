@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -17,6 +18,7 @@ import (
 )
 
 type Config struct {
+	Jira   http.Handler
 	Auth   *auth.Checker
 	CK     *cklogs.Service
 	Gate   backend.Gate
@@ -51,6 +53,30 @@ func New(cfg Config) http.Handler {
 		now:    now,
 	}
 	mux := http.NewServeMux()
+	if cfg.Jira != nil {
+		mux.Handle("/v1/jira/", cfg.Jira)
+	} else {
+		mux.HandleFunc("/v1/jira/", func(w http.ResponseWriter, r *http.Request) {
+			if !regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,128}$`).MatchString(r.Header.Get("X-Request-Id")) {
+				r.Header.Del("X-Request-Id")
+			}
+			id := auditlog.NewRecord(r, now(), time.UTC).RequestID
+			w.Header().Set("X-Request-Id", id)
+			if rec := auditlog.From(r.Context()); rec != nil {
+				rec.SetJira("", "", "jira_request")
+			}
+			p, st, c := cfg.Auth.Authenticate(r)
+			if st == 0 {
+				st = 403
+				c = "token_scope_forbidden"
+				if len(p.Projects) > 0 {
+					st = 503
+					c = "upstream_unavailable"
+				}
+			}
+			writeJSON(w, st, map[string]string{"error": c, "code": c, "requestId": id})
+		})
+	}
 	mux.HandleFunc("GET /health", s.handleHealth)
 	mux.HandleFunc("GET /ready", s.handleReady)
 	mux.HandleFunc("POST /v1/cklogs/delivery", s.handleDelivery)
@@ -69,13 +95,13 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 	echoRID(w, r)
-	if s.auth != nil && s.auth.Ready() && s.ckUser != "" && s.ckPass != "" {
+	if s.auth != nil && s.auth.Ready() && (!s.auth.HasCKLogs() || (s.ckUser != "" && s.ckPass != "")) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 		return
 	}
 	writeJSON(w, http.StatusServiceUnavailable, map[string]string{
 		"status": "not_ready",
-		"error":  "GATEWAY_TOKEN_EXTERNAL / GATEWAY_TOKEN_INTERNAL / GATEWAY_AUTH_TOKENS 或 CK_LOGS_BASIC_USER/PASS 未配置",
+		"error":  "启用的服务配置不完整",
 	})
 }
 
@@ -84,6 +110,9 @@ func (s *Server) withAudit(next http.Handler) http.Handler {
 		if s.audit == nil || !strings.HasPrefix(r.URL.Path, "/v1/") {
 			next.ServeHTTP(w, r)
 			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/v1/jira/") && !regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,128}$`).MatchString(r.Header.Get("X-Request-Id")) {
+			r.Header.Del("X-Request-Id")
 		}
 		started := time.Now()
 		rec := auditlog.NewRecord(r, s.now(), auditlog.Shanghai())
@@ -94,7 +123,7 @@ func (s *Server) withAudit(next http.Handler) http.Handler {
 		next.ServeHTTP(rw, r.WithContext(auditlog.WithRecord(r.Context(), rec)))
 		rec.SetHTTPStatus(rw.status)
 		rec.SetDuration(time.Since(started))
-		if q, ok := s.gate.(*queue.FIFO); ok {
+		if q, ok := s.gate.(*queue.FIFO); ok && !strings.HasPrefix(r.URL.Path, "/v1/jira/") {
 			inFlight, depth := q.Snapshot()
 			rec.SetQueueSnapshot(inFlight, depth)
 		}
@@ -123,6 +152,9 @@ func (s *Server) checkAuth(w http.ResponseWriter, r *http.Request) (*http.Reques
 		return r, false
 	}
 	status, code, msg, class := s.auth.CheckClass(r)
+	if status == 0 && class != auth.ClassExternal && class != auth.ClassInternal {
+		status, code, msg = http.StatusForbidden, "token_scope_forbidden", "当前 token 不能调用此服务"
+	}
 	if status != 0 {
 		if rec != nil {
 			rec.SetAuth(code)
@@ -243,3 +275,5 @@ func writeAPIError(w http.ResponseWriter, err error) {
 	}
 	writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error(), "code": "invalid_body"})
 }
+
+func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }

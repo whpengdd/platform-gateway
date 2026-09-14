@@ -1,0 +1,11 @@
+config.json
+**/config.json
+.env
+.env.*
+!.env.example
+.git
+.claude
+.codex
+bin
+logs
+*.log

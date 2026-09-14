@@ -1,57 +1,27 @@
 # Platform Gateway 接口
 
+本文记录已实现的 cklogs 接口。认证使用 [统一 token 配置文件](gateway-auth.md)，同时管理 cklogs external/internal 和 Jira 项目授权；Jira 接口见 [jira-api.md](jira-api.md)。cklogs 路径及两档权限保持兼容。
+
 日志中转层（Go，默认 `127.0.0.1:8091`）。浏览器、前端、Chat BFF **都不直连**。公网自助由 rag-explorer-ai 的 **self-service Runtime** 用外网 token 调；149 Worker / Factory 用内部 token 调 `analysis/*`。
 
 鉴权：`Authorization: Bearer <token>`。无 token / 错 token → 401。`GET /health`、`GET /ready` 不鉴权。
 
-Token 不是登录 JWT，也不是 Kibana Basic。是本机生成的不透明字符串，写进 gateway 进程和 rag-explorer-ai 的 `.env.local`，两边必须对上。
+Token 使用不透明 Bearer 值。网关从工作目录 ./config.json 读取，GATEWAY_AUTH_FILE 可覆盖路径。调用方仍从自己的环境变量发送原 Bearer 值。
 
----
+## 0. 凭据与迁移
 
-## 0. Key 怎么获取
+用 openssl rand -hex 32 分别生成 external/internal 凭据，写为文件中的独立条目。重复 token 启动失败，不再采用 internal 优先。
 
-没有后台「申请 key」页面。自己生成两把，分别给外网自助和内部客服。
+| 角色 | 配置位置 |
+|---|---|
+| gateway external | tokens 中的 cklogs=external 条目 |
+| gateway internal | tokens 中的 cklogs=internal 条目 |
+| 自助 Runtime | PLATFORM_GATEWAY_TOKEN，保持与 external 条目值相同 |
+| Worker / Factory | PLATFORM_GATEWAY_INTERNAL_TOKEN，保持与 internal 条目值相同 |
 
-```bash
-openssl rand -hex 32
-```
+完整 JSON 与步骤见 [迁移文档](gateway-auth.md)。旧 GATEWAY_TOKEN_EXTERNAL、GATEWAY_TOKEN_INTERNAL、GATEWAY_AUTH_TOKENS 必须从网关环境删除；旧 AUTH_TOKENS 每个值迁为 external。调用方变量名和值可以保留。
 
-两把 **不要相同**。相同的话 gateway 会当成内部档，外网机器一旦被打穿就能打 `analysis/*`。
-
-生成后只写环境变量，**不要提交 git，不要写进这篇文档的示例值**。
-
-### 写到哪
-
-| 角色 | 进程环境变量 | 值 |
-|---|---|---|
-| gateway 认外网档 | `GATEWAY_TOKEN_EXTERNAL`（可逗号多个） | 第一把 |
-| gateway 认内部档 | `GATEWAY_TOKEN_INTERNAL`（可逗号多个） | 第二把 |
-| 自助 Runtime（`rag-self-service`） | `PLATFORM_GATEWAY_TOKEN` + `PLATFORM_GATEWAY_BASE_URL=http://rag-platform-gateway:8091` | **必须等于**外网那把 |
-| Worker / Factory | `PLATFORM_GATEWAY_INTERNAL_TOKEN` + 同一个 `BASE_URL` | **必须等于**内部那把 |
-
-兼容：如果 `GATEWAY_TOKEN_EXTERNAL` 和 `GATEWAY_TOKEN_INTERNAL` 都空，旧变量 `GATEWAY_AUTH_TOKENS` 里的全部 token **一律当外网档**（不能打 `analysis/*`）。63 公网机器只应持有外网 token。
-
-Kibana 账号 `CK_LOGS_BASIC_USER` / `PASS` 只活在 gateway 容器/进程里，**不要**写进自助 Runtime 的 `.env.local`。
-
-Token 配对脚本仍在 rag-explorer-ai：`scripts/deploy/platform-gateway/ensure-tokens.mjs`。
-
-### 151 裸机（不用 Docker 起中转层）
-
-1. 生成两把 token（上节）。
-2. 在本仓启动 `./bin/platform-gateway` 的环境里设置：
-   - `LISTEN_ADDR=127.0.0.1:8091`
-   - `GATEWAY_TOKEN_EXTERNAL=<外网>`
-   - `GATEWAY_TOKEN_INTERNAL=<内部>`
-   - `CK_LOGS_*`（Kibana）
-   - `GATEWAY_LOG_DIR=<rag-explorer-ai>/logs/platform-gateway`
-3. rag-explorer-ai 仓库根 `.env.local`：
-   ```bash
-   PLATFORM_GATEWAY_BASE_URL=http://127.0.0.1:8091
-   PLATFORM_GATEWAY_TOKEN=<外网那把>
-   PLATFORM_GATEWAY_INTERNAL_TOKEN=<内部那把>
-   ```
-4. **改 token 后要重启 gateway**。再重启 Worker / Application Runtime。
-5. 8091 只绑 loopback。本机 `curl http://127.0.0.1:8091/health` 应 200；非 loopback 应连不上。
+裸机默认读取 app-root/config.json，容器工作目录为 /，只读挂载宿主文件至 /config.json。确保 UID 65532 可读。修改后执行 docker compose up -d --force-recreate --no-deps platform-gateway；裸机重启进程。文件不提交 Git、不进入镜像。调用方仓库的旧 token 配对脚本未修改。
 
 ### 校验自己拿到的是哪一档
 
@@ -159,4 +129,4 @@ curl -sS -X POST "$GW/v1/cklogs/delivery" \
 
 - 浏览器 / 前端 / nginx 公网
 - 客户 SSO / 登录 JWT（那是 rag-explorer-ai Node `scope.mjs`）
-- 63 公网 self-service 机器：只配外网 token，不要配 `GATEWAY_TOKEN_INTERNAL` / `PLATFORM_GATEWAY_INTERNAL_TOKEN`
+- 63 公网 self-service 机器：只配外网 token，不要授权 internal 条目或配置调用方 PLATFORM_GATEWAY_INTERNAL_TOKEN
