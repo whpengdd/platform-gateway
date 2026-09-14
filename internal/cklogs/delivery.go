@@ -52,6 +52,17 @@ func (s *Service) QuerySelfServiceDelivery(ctx context.Context, in DeliveryQuery
 			}
 			total = mta.Total
 		}
+		if total == 0 && in.Direction == "inbound" {
+			proxy := s.Client.Query(ctx, Filters{
+				Sender:    derived.Sender,
+				Recipient: derived.Recipient,
+				TimeRange: in.TimeRange,
+			}, QueryOptions{Dataset: "delivery_proxy", CountOnly: true})
+			if !proxy.OK {
+				return proxyFailure(proxy)
+			}
+			total = proxy.Total
+		}
 		return DeliveryResult{
 			Status:      "ok",
 			Provider:    "log_platform",

@@ -78,7 +78,7 @@ curl -sS -X POST "$GW/v1/cklogs/analysis/delivery" \
 | POST | `/v1/cklogs/login` | `account` | `clientIp`、`timeRange`、`countOnly` | 必须有账号；窗口 ≤30 天 |
 | POST | `/v1/cklogs/message` | `tid` | `timeRange` | 必须先有 tid；窗口 ≤30 天 |
 
-`delivery`：`account` 是被查邮箱，`peer` 是对方。inbound = account 当收件人，outbound = account 当发件人。
+`delivery`：`account` 是被查邮箱，`peer` 是对方。inbound = account 当收件人，outbound = account 当发件人。`countOnly` 只做 `size:0` 计数、不拉明细：先 DATRANS，零命中再 MTA；inbound 仍为零再查 PROXY。
 
 内部 token **也可以**调这三条（内部是超集）。
 

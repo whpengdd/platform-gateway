@@ -740,6 +740,74 @@ func TestQuerySelfServiceDeliveryLog_countOnlyDoesNotFetchHits(t *testing.T) {
 	}
 }
 
+func TestQuerySelfServiceDeliveryLog_countOnlyInboundIncludesProxy(t *testing.T) {
+	input := inboundInput()
+	input.CountOnly = true
+	svc, n := newService(t, func(w http.ResponseWriter, r *http.Request) {
+		body := readBody(r)
+		if !strings.Contains(body, `"size":0`) {
+			t.Errorf("count body must use size 0: %s", body)
+		}
+		if strings.Contains(body, `"sort"`) {
+			t.Errorf("count body must not sort: %s", body)
+		}
+		switch {
+		case strings.Contains(body, "datrans_distributed"), strings.Contains(body, "mtatrans_distributed"):
+			w.Write(hitsBodyTotal(0, nil))
+		case strings.Contains(body, "proxytrans_distributed"):
+			w.Write(hitsBodyTotal(5, nil))
+		default:
+			t.Errorf("unexpected index: %s", body)
+			w.Write(hitsBody(nil))
+		}
+	})
+	out := svc.QuerySelfServiceDelivery(context.Background(), input)
+	if out.Status != "ok" || out.Total == nil || *out.Total != 5 || len(out.Entries) != 0 {
+		t.Fatalf("%+v", out)
+	}
+	if out.CountOnly == nil || !*out.CountOnly {
+		t.Fatalf("countOnly=%v", out.CountOnly)
+	}
+	if atomic.LoadInt32(n) != 3 {
+		t.Fatalf("calls=%d want 3 (DA+MTA+PROXY count)", *n)
+	}
+}
+
+func TestQuerySelfServiceDeliveryLog_countOnlyOutboundSkipsProxy(t *testing.T) {
+	input := testInput()
+	input.CountOnly = true
+	svc, n := newService(t, func(w http.ResponseWriter, r *http.Request) {
+		body := readBody(r)
+		if strings.Contains(body, "proxytrans_distributed") {
+			t.Fatalf("outbound countOnly queried proxy: %s", body)
+		}
+		w.Write(hitsBodyTotal(0, nil))
+	})
+	out := svc.QuerySelfServiceDelivery(context.Background(), input)
+	if out.Status != "ok" || out.Total == nil || *out.Total != 0 || len(out.Entries) != 0 {
+		t.Fatalf("%+v", out)
+	}
+	if atomic.LoadInt32(n) != 2 {
+		t.Fatalf("calls=%d want 2 (DA+MTA count)", *n)
+	}
+}
+
+func TestQuerySelfServiceDeliveryLog_countOnlySkipsProxyWhenDAHits(t *testing.T) {
+	input := inboundInput()
+	input.CountOnly = true
+	svc, n := newService(t, func(w http.ResponseWriter, r *http.Request) {
+		body := readBody(r)
+		if strings.Contains(body, "proxytrans_distributed") || strings.Contains(body, "mtatrans_distributed") {
+			t.Fatalf("DA hit must not fall through: %s", body)
+		}
+		w.Write(hitsBodyTotal(3, nil))
+	})
+	out := svc.QuerySelfServiceDelivery(context.Background(), input)
+	if out.Status != "ok" || out.Total == nil || *out.Total != 3 || atomic.LoadInt32(n) != 1 {
+		t.Fatalf("%+v calls=%d", out, *n)
+	}
+}
+
 func TestQuerySelfServiceDeliveryLog_datransTruncated(t *testing.T) {
 	input := testInput()
 	svc, _ := newService(t, func(w http.ResponseWriter, r *http.Request) {
@@ -839,7 +907,7 @@ func TestQuerySelfServiceDeliveryLog_inboundThreeSourcesZero(t *testing.T) {
 	if !strings.Contains(strings.Join(out.Limitations, "\n"), "在所选时间范围及查询条件内，未发现发件方向我方系统投递该邮件") {
 		t.Fatalf("limitations=%v", out.Limitations)
 	}
-	if atomic.LoadInt32(n) != 3 {
+	if atomic.LoadInt32(n) != 4 {
 		t.Fatalf("calls=%d", *n)
 	}
 }
