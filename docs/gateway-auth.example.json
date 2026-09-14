@@ -1,0 +1,53 @@
+{
+  "tokens": [
+    {
+      "token": "<ck-external-token>",
+      "cklogs": "external"
+    },
+    {
+      "token": "<ck-internal-token>",
+      "cklogs": "internal"
+    },
+    {
+      "token": "<zammad-token-A>",
+      "jiraProjects": [
+        "CS",
+        "IT"
+      ]
+    },
+    {
+      "token": "<zammad-token-B>",
+      "jiraProjects": [
+        "CS"
+      ]
+    }
+  ],
+  "jira": {
+    "projects": {
+      "CS": {
+        "filterJql": "labels = zammad",
+        "issueTypeId": "10504",
+        "createDefaults": {
+          "labels": [
+            "zammad"
+          ]
+        },
+        "createFields": [
+          "summary",
+          "description"
+        ],
+        "readFields": [
+          "summary",
+          "description",
+          "status",
+          "updated",
+          "reporter",
+          "creator",
+          "assignee",
+          "attachment"
+        ]
+      },
+      "IT": {}
+    }
+  }
+}

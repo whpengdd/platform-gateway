@@ -16,7 +16,9 @@ import (
 	"platform-gateway/internal/auditlog"
 	"platform-gateway/internal/auth"
 	"platform-gateway/internal/cklogs"
+	fileconfig "platform-gateway/internal/config"
 	"platform-gateway/internal/httpapi"
+	"platform-gateway/internal/jira"
 	"platform-gateway/internal/queue"
 )
 
@@ -44,8 +46,17 @@ func main() {
 		defer audit.Close()
 		log.Printf("audit jsonl dir %s", cfg.logDir)
 	}
+	checker := auth.NewFromFile(cfg.authFile, cfg.cidrs)
+	var jiraHandler http.Handler
+	if cfg.jiraClient != nil {
+		jiraHandler, err = jira.NewServer(cfg.jiraClient, checker, cfg.authFile.Jira.Projects)
+		if err != nil {
+			log.Fatal(err)
+		}
+	}
 	handler := httpapi.New(httpapi.Config{
-		Auth:   auth.NewWithClasses(cfg.externalTokens, cfg.internalTokens, cfg.cidrs),
+		Jira:   jiraHandler,
+		Auth:   checker,
 		CK:     cklogs.NewService(client),
 		Gate:   gate,
 		Audit:  audit,
@@ -92,60 +103,72 @@ func newHTTPClient(timeout time.Duration) *http.Client {
 }
 
 type config struct {
-	listen         string
-	externalTokens []string
-	internalTokens []string
-	cidrs          []*net.IPNet
-	logDir         string
-	ckBase         string
-	ckUser         string
-	ckPass         string
-	ckIndex        string
-	ckTimeout      time.Duration
-	maxConc        int
-	queueSize      int
-	queueWait      time.Duration
+	listen     string
+	authFile   *fileconfig.File
+	jiraClient *jira.Client
+	cidrs      []*net.IPNet
+	logDir     string
+	ckBase     string
+	ckUser     string
+	ckPass     string
+	ckIndex    string
+	ckTimeout  time.Duration
+	maxConc    int
+	queueSize  int
+	queueWait  time.Duration
 }
 
 func loadConfig() (config, error) {
-	maxConc, err := envIntMin("CKLOGS_MAX_CONCURRENCY", 2, 1)
+	authFile, err := fileconfig.Load()
 	if err != nil {
 		return config{}, err
 	}
-	queueSize, err := envIntMin("CKLOGS_QUEUE_SIZE", 32, 0)
-	if err != nil {
-		return config{}, err
-	}
-	queueWaitMS, err := envIntMin("CKLOGS_QUEUE_WAIT_MS", 30000, 1)
-	if err != nil {
-		return config{}, err
-	}
-	if int64(queueWaitMS) > int64((1<<63-1)/time.Millisecond) {
-		return config{}, fmt.Errorf("CKLOGS_QUEUE_WAIT_MS exceeds the supported duration")
+	maxConc, queueSize, queueWaitMS := 2, 32, 30000
+	if authFile.Enabled("cklogs") {
+		maxConc, err = envIntMin("CKLOGS_MAX_CONCURRENCY", 2, 1)
+		if err != nil {
+			return config{}, err
+		}
+		queueSize, err = envIntMin("CKLOGS_QUEUE_SIZE", 32, 0)
+		if err != nil {
+			return config{}, err
+		}
+		queueWaitMS, err = envIntMin("CKLOGS_QUEUE_WAIT_MS", 30000, 1)
+		if err != nil {
+			return config{}, err
+		}
+		if int64(queueWaitMS) > int64((1<<63-1)/time.Millisecond) {
+			return config{}, fmt.Errorf("CKLOGS_QUEUE_WAIT_MS exceeds the supported duration")
+		}
 	}
 	cidrs, err := auth.ParseCIDRs(os.Getenv("GATEWAY_ALLOW_CIDRS"))
 	if err != nil {
 		return config{}, err
 	}
-	external := auth.ParseTokens(os.Getenv("GATEWAY_TOKEN_EXTERNAL"))
-	internal := auth.ParseTokens(os.Getenv("GATEWAY_TOKEN_INTERNAL"))
-	if len(external) == 0 && len(internal) == 0 {
-		external = auth.ParseTokens(os.Getenv("GATEWAY_AUTH_TOKENS"))
+	if authFile.Enabled("cklogs") && (strings.TrimSpace(os.Getenv("CK_LOGS_BASIC_USER")) == "" || strings.TrimSpace(os.Getenv("CK_LOGS_BASIC_PASS")) == "") {
+		return config{}, fmt.Errorf("cklogs credentials required")
+	}
+	var jiraClient *jira.Client
+	if authFile.Enabled("jira") {
+		jiraClient, err = jira.NewClient(os.Getenv("JIRA_BASE_URL"), os.Getenv("JIRA_API_TOKEN"), os.Getenv("JIRA_BASIC_USER"), os.Getenv("JIRA_BASIC_PASSWORD"))
+		if err != nil {
+			return config{}, err
+		}
 	}
 	return config{
-		listen:         envOr("LISTEN_ADDR", ":8091"),
-		externalTokens: external,
-		internalTokens: internal,
-		cidrs:          cidrs,
-		logDir:         logDir(),
-		ckBase:         envOr("CK_LOGS_BASE_URL", cklogs.DefaultBaseURL),
-		ckUser:         strings.TrimSpace(os.Getenv("CK_LOGS_BASIC_USER")),
-		ckPass:         strings.TrimSpace(os.Getenv("CK_LOGS_BASIC_PASS")),
-		ckIndex:        envOr("CK_LOGS_INDEX", "mtatrans_distributed"),
-		ckTimeout:      time.Duration(envInt("CK_LOGS_TIMEOUT_MS", 60000)) * time.Millisecond,
-		maxConc:        maxConc,
-		queueSize:      queueSize,
-		queueWait:      time.Duration(queueWaitMS) * time.Millisecond,
+		listen:     envOr("LISTEN_ADDR", ":8091"),
+		authFile:   authFile,
+		jiraClient: jiraClient,
+		cidrs:      cidrs,
+		logDir:     logDir(),
+		ckBase:     envOr("CK_LOGS_BASE_URL", cklogs.DefaultBaseURL),
+		ckUser:     strings.TrimSpace(os.Getenv("CK_LOGS_BASIC_USER")),
+		ckPass:     strings.TrimSpace(os.Getenv("CK_LOGS_BASIC_PASS")),
+		ckIndex:    envOr("CK_LOGS_INDEX", "mtatrans_distributed"),
+		ckTimeout:  time.Duration(envInt("CK_LOGS_TIMEOUT_MS", 60000)) * time.Millisecond,
+		maxConc:    maxConc,
+		queueSize:  queueSize,
+		queueWait:  time.Duration(queueWaitMS) * time.Millisecond,
 	}, nil
 }
 

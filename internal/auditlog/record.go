@@ -15,26 +15,30 @@ import (
 type Record struct {
 	mu sync.Mutex
 
-	TS           string         `json:"ts"`
-	Event        string         `json:"event"`
-	RequestID    string         `json:"request_id"`
-	ClientIP     string         `json:"client_ip,omitempty"`
-	Operation    string         `json:"operation"`
-	Auth         string         `json:"auth,omitempty"`
-	TokenClass   string         `json:"token_class,omitempty"`
-	Query        map[string]any `json:"query,omitempty"`
-	QueueWaitMS  int64          `json:"queue_wait_ms"`
-	InFlight     int            `json:"in_flight,omitempty"`
-	QueueDepth   int            `json:"queue_depth,omitempty"`
-	KibanaCalls  []KibanaCall   `json:"kibana_calls"`
-	HTTPStatus   int            `json:"http_status"`
-	ResultStatus string         `json:"result_status,omitempty"`
-	ResultCode   string         `json:"result_code,omitempty"`
-	ResultTotal  *int           `json:"result_total,omitempty"`
-	Returned     int            `json:"returned,omitempty"`
-	Limitations  []string       `json:"limitations,omitempty"`
-	DurationMS   int64          `json:"duration_ms"`
-	Error        string         `json:"error,omitempty"`
+	Backend          string         `json:"backend,omitempty"`
+	Project          string         `json:"project,omitempty"`
+	TokenFingerprint string         `json:"token_fingerprint,omitempty"`
+	UpstreamStatus   int            `json:"upstream_status,omitempty"`
+	TS               string         `json:"ts"`
+	Event            string         `json:"event"`
+	RequestID        string         `json:"request_id"`
+	ClientIP         string         `json:"client_ip,omitempty"`
+	Operation        string         `json:"operation"`
+	Auth             string         `json:"auth,omitempty"`
+	TokenClass       string         `json:"token_class,omitempty"`
+	Query            map[string]any `json:"query,omitempty"`
+	QueueWaitMS      int64          `json:"queue_wait_ms"`
+	InFlight         int            `json:"in_flight,omitempty"`
+	QueueDepth       int            `json:"queue_depth,omitempty"`
+	KibanaCalls      []KibanaCall   `json:"kibana_calls"`
+	HTTPStatus       int            `json:"http_status"`
+	ResultStatus     string         `json:"result_status,omitempty"`
+	ResultCode       string         `json:"result_code,omitempty"`
+	ResultTotal      *int           `json:"result_total,omitempty"`
+	Returned         int            `json:"returned,omitempty"`
+	Limitations      []string       `json:"limitations,omitempty"`
+	DurationMS       int64          `json:"duration_ms"`
+	Error            string         `json:"error,omitempty"`
 }
 
 type KibanaCall struct {
@@ -207,4 +211,25 @@ func clipStrings(in []string, maxN, maxLen int) []string {
 		out = append(out, s)
 	}
 	return out
+}
+
+func (rec *Record) SetJira(project, fingerprint, operation string) {
+	if rec == nil {
+		return
+	}
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	rec.Backend = "jira"
+	rec.Project = project
+	rec.TokenFingerprint = fingerprint
+	rec.Operation = operation
+	rec.Query = nil
+}
+func (rec *Record) SetJiraUpstream(status int) {
+	if rec == nil {
+		return
+	}
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	rec.UpstreamStatus = status
 }

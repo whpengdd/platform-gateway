@@ -13,6 +13,7 @@ FROM alpine:3.20
 RUN apk add --no-cache ca-certificates \
     && adduser -D -H -u 65532 -g nonroot nonroot
 COPY --from=builder /platform-gateway /platform-gateway
+WORKDIR /
 USER nonroot:nonroot
 EXPOSE 8091
 ENTRYPOINT ["/platform-gateway"]
