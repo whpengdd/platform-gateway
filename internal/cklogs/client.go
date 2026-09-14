@@ -215,6 +215,8 @@ func (c *Client) Query(ctx context.Context, filters Filters, opts QueryOptions) 
 			entries = append(entries, mapDeliveryAgentHit(src))
 		case ds != nil && ds.Kind == "delivery_pipeline":
 			entries = append(entries, mapDeliveryPipelineHit(src))
+		case ds != nil && ds.Kind == "delivery_proxy":
+			entries = append(entries, mapDeliveryProxyHit(src))
 		default:
 			entries = append(entries, mapHitToEntry(src))
 		}

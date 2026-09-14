@@ -226,6 +226,43 @@ func mapDeliveryAgentHit(src map[string]any) Entry {
 	}
 }
 
+func mapDeliveryProxyHit(src map[string]any) Entry {
+	if src == nil {
+		src = map[string]any{}
+	}
+	var recipients []string
+	switch v := src["to"].(type) {
+	case []any:
+		for _, item := range v {
+			if value := asString(item); value != "" {
+				recipients = append(recipients, value)
+			}
+		}
+	case []string:
+		for _, value := range v {
+			if value != "" {
+				recipients = append(recipients, value)
+			}
+		}
+	default:
+		if value := asString(v); value != "" {
+			recipients = []string{value}
+		}
+	}
+	return Entry{
+		Source:       "proxy",
+		Tid:          asString(src["tid"]),
+		TimestampISO: toIso(src["timestamp"]),
+		Sender:       asString(src["from"]),
+		Recipients:   recipients,
+		Subject:      asString(src["subject"]),
+		Result:       asString(src["result"]),
+		Errinfo:      asString(src["desc"]),
+		ClientIP:     asString(src["ip"]),
+		Channel:      asString(src["log_source"]),
+	}
+}
+
 func mapDeliveryPipelineHit(src map[string]any) Entry {
 	if src == nil {
 		src = map[string]any{}

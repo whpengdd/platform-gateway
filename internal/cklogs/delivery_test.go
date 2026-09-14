@@ -734,6 +734,197 @@ func TestQuerySelfServiceDeliveryLog_datransTruncated(t *testing.T) {
 	}
 }
 
+func inboundInput() DeliveryQuery {
+	return DeliveryQuery{Direction: "inbound", Recipient: "recipient@example.com", TimeRange: testRange()}
+}
+
+func TestQuerySelfServiceDeliveryLog_inboundProxyStatusesAndAggregation(t *testing.T) {
+	input := inboundInput()
+	svc, n := newService(t, func(w http.ResponseWriter, r *http.Request) {
+		body := readBody(r)
+		switch {
+		case strings.Contains(body, "datrans_distributed"), strings.Contains(body, "mtatrans_distributed"):
+			w.Write(hitsBody(nil))
+		case strings.Contains(body, `"size":0`):
+			w.Write(hitsBodyTotal(4, nil))
+		default:
+			w.Write(hitsBody([]map[string]any{
+				{"tid": "REJECT", "timestamp": float64(100), "from": "sender@example.net", "to": input.Recipient, "result": "250 accepted"},
+				{"tid": "REJECT", "timestamp": float64(200), "from": "sender@example.net", "to": []any{input.Recipient}, "result": "550 User not found"},
+				{"tid": "REJECT", "timestamp": float64(300), "from": "sender@example.net", "to": input.Recipient, "result": "250 accepted later"},
+				{"tid": "UNKNOWN", "timestamp": float64(400), "from": "other@example.net", "to": input.Recipient, "result": "250 queued"},
+			}))
+		}
+	})
+	out := svc.QuerySelfServiceDelivery(context.Background(), input)
+	if out.Status != "ok" || out.Total == nil || *out.Total != 2 || len(out.Entries) != 2 {
+		t.Fatalf("%+v", out)
+	}
+	byTid := map[string]Entry{}
+	for _, entry := range out.Entries {
+		byTid[entry.Tid] = entry
+	}
+	rejected := byTid["REJECT"]
+	if rejected.Source != "proxy" || rejected.StatusSource != "proxy" || rejected.DeliveryStatus != "failed" || rejected.StatusText != "邮件已被我方入口拒绝" || rejected.FailureReason != "收件人地址不存在，请核对后重试" || rejected.TimestampISO != toIso(float64(200)) {
+		t.Fatalf("rejected=%+v", rejected)
+	}
+	unknown := byTid["UNKNOWN"]
+	if unknown.DeliveryStatus != "unknown" || unknown.StatusText != "邮件后续处理状态异常，请联系客服进一步核实" || unknown.FailureReason != "" {
+		t.Fatalf("unknown=%+v", unknown)
+	}
+	if atomic.LoadInt32(n) != 4 {
+		t.Fatalf("calls=%d", *n)
+	}
+}
+
+func TestQuerySelfServiceDeliveryLog_inboundProxyKeepsEmptySubject(t *testing.T) {
+	input := inboundInput()
+	input.Sender = "sender@example.net"
+	input.Recipient = ""
+	input.Subject = "Wanted"
+	svc, _ := newService(t, func(w http.ResponseWriter, r *http.Request) {
+		body := readBody(r)
+		switch {
+		case strings.Contains(body, "datrans_distributed"), strings.Contains(body, "mtatrans_distributed"):
+			w.Write(hitsBody(nil))
+		case strings.Contains(body, `"size":0`):
+			if strings.Contains(body, `"subject"`) {
+				t.Errorf("self-service proxy fallback must not push subject: %s", body)
+			}
+			w.Write(hitsBodyTotal(1, nil))
+		default:
+			if strings.Contains(body, `"subject"`) {
+				t.Errorf("self-service proxy fallback must not push subject: %s", body)
+			}
+			w.Write(hitsBody([]map[string]any{{"tid": "EMPTY-SUBJECT", "timestamp": float64(100), "from": input.Sender, "to": "recipient@example.com", "subject": "", "result": "reject"}}))
+		}
+	})
+	out := svc.QuerySelfServiceDelivery(context.Background(), input)
+	if out.Status != "ok" || out.Total == nil || *out.Total != 1 || out.Entries[0].Tid != "EMPTY-SUBJECT" {
+		t.Fatalf("%+v", out)
+	}
+}
+
+func TestQuerySelfServiceDeliveryLog_inboundThreeSourcesZero(t *testing.T) {
+	svc, n := newService(t, func(w http.ResponseWriter, r *http.Request) { w.Write(hitsBody(nil)) })
+	out := svc.QuerySelfServiceDelivery(context.Background(), inboundInput())
+	if out.Status != "ok" || out.Total == nil || *out.Total != 0 || len(out.Entries) != 0 {
+		t.Fatalf("%+v", out)
+	}
+	if !strings.Contains(strings.Join(out.Limitations, "\n"), "在所选时间范围及查询条件内，未发现发件方向我方系统投递该邮件") {
+		t.Fatalf("limitations=%v", out.Limitations)
+	}
+	if atomic.LoadInt32(n) != 3 {
+		t.Fatalf("calls=%d", *n)
+	}
+}
+
+func TestQuerySelfServiceDeliveryLog_outboundNeverQueriesProxy(t *testing.T) {
+	svc, n := newService(t, func(w http.ResponseWriter, r *http.Request) {
+		body := readBody(r)
+		if strings.Contains(body, "proxytrans_distributed") {
+			t.Fatalf("outbound queried proxy: %s", body)
+		}
+		w.Write(hitsBody(nil))
+	})
+	out := svc.QuerySelfServiceDelivery(context.Background(), testInput())
+	if out.Status != "ok" || out.Total == nil || *out.Total != 0 || atomic.LoadInt32(n) != 2 {
+		t.Fatalf("%+v calls=%d", out, *n)
+	}
+}
+
+func TestQuerySelfServiceDeliveryLog_mtaErrorDoesNotQueryProxy(t *testing.T) {
+	svc, n := newService(t, func(w http.ResponseWriter, r *http.Request) {
+		body := readBody(r)
+		if strings.Contains(body, "proxytrans_distributed") {
+			t.Fatalf("MTA error must not query proxy: %s", body)
+		}
+		if strings.Contains(body, "datrans_distributed") {
+			w.Write(hitsBody(nil))
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	out := svc.QuerySelfServiceDelivery(context.Background(), inboundInput())
+	if out.Status != "error" || out.Code != "CK_LOGS_UPSTREAM_ERROR" || atomic.LoadInt32(n) != 2 {
+		t.Fatalf("%+v calls=%d", out, *n)
+	}
+}
+
+func TestQuerySelfServiceDeliveryLog_proxyTruncated(t *testing.T) {
+	svc, n := newService(t, func(w http.ResponseWriter, r *http.Request) {
+		body := readBody(r)
+		if strings.Contains(body, "datrans_distributed") || strings.Contains(body, "mtatrans_distributed") {
+			w.Write(hitsBody(nil))
+			return
+		}
+		w.Write(hitsBodyTotal(HardSize+1, nil))
+	})
+	out := svc.QuerySelfServiceDelivery(context.Background(), inboundInput())
+	if out.Status != "error" || out.Code != "CK_LOGS_PROXY_TRUNCATED" || out.Truncated == nil || !*out.Truncated || len(out.Entries) != 0 {
+		t.Fatalf("%+v", out)
+	}
+	if atomic.LoadInt32(n) != 3 {
+		t.Fatalf("calls=%d", *n)
+	}
+}
+
+func TestQueryProxy_recipientFallbackWithCompoundTo(t *testing.T) {
+	tests := []struct {
+		name         string
+		senderDomain string
+		from         string
+	}{
+		{name: "recipient only", from: "sender@other.net"},
+		{name: "sender domain and recipient", senderDomain: "example.net", from: "sender@example.net"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input := inboundInput()
+			input.SenderDomain = tt.senderDomain
+			calls := 0
+			svc, _ := newService(t, func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				body := readBody(r)
+				switch calls {
+				case 1:
+					if !strings.Contains(body, `"to":"recipient@example.com"`) {
+						t.Fatalf("exact query missing recipient: %s", body)
+					}
+					w.Write(hitsBody(nil))
+				case 2:
+					if strings.Contains(body, `"to":"recipient@example.com"`) {
+						t.Fatalf("candidate query retained recipient: %s", body)
+					}
+					w.Write(hitsBodyTotal(1, nil))
+				default:
+					w.Write(hitsBody([]map[string]any{{
+						"tid": "PROXY-COMPOUND", "timestamp": float64(100), "from": tt.from,
+						"to": "other@example.com; recipient@example.com", "result": "reject",
+					}}))
+				}
+			})
+			derived := deriveQuery(input)
+			out := svc.queryProxy(context.Background(), Filters{Recipient: derived.Recipient, TimeRange: input.TimeRange}, derived, 1, HardSize)
+			if out.Status != "ok" || out.Total == nil || *out.Total != 1 || len(out.Entries) != 1 || out.Entries[0].Tid != "PROXY-COMPOUND" {
+				t.Fatalf("%+v", out)
+			}
+			if calls != 3 {
+				t.Fatalf("calls=%d", calls)
+			}
+		})
+	}
+}
+
+func TestProxyPageResult_maxIntPage(t *testing.T) {
+	rows := []Entry{{Tid: "one"}}
+	maxInt := int(^uint(0) >> 1)
+	out := proxyPageResult(rows, maxInt, HardSize, nil)
+	if out.Status != "ok" || out.Total == nil || *out.Total != 1 || len(out.Entries) != 0 || out.HasMore == nil || *out.HasMore {
+		t.Fatalf("%+v", out)
+	}
+}
+
 func TestQueryLogin_unavailableDatasetsHaveNoTotal(t *testing.T) {
 	svc, n := newService(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Write(hitsBody(nil))

@@ -29,10 +29,11 @@ var bouncePatterns = []struct {
 }
 
 var (
-	mtaFailedRe  = regexp.MustCompile(`(?:bounce|fail|error|reject|den(?:y|ied)|invalid|5\d\d|hard)`)
-	mtaPendingRe = regexp.MustCompile(`(?:defer|queue|pending|retry|temporary|4\d\d)`)
-	mtaSOkRe     = regexp.MustCompile(`(?:^|\s)s_ok(?:\s|$)`)
-	splitRcptRe  = regexp.MustCompile(`[;,]`)
+	mtaFailedRe   = regexp.MustCompile(`(?:bounce|fail|error|reject|den(?:y|ied)|invalid|5\d\d|hard)`)
+	mtaPendingRe  = regexp.MustCompile(`(?:defer|queue|pending|retry|temporary|4\d\d)`)
+	mtaSOkRe      = regexp.MustCompile(`(?:^|\s)s_ok(?:\s|$)`)
+	proxyRejectRe = regexp.MustCompile(`(?:\b5\d\d\b|reject|user (?:unknown|not found)|mailbox unavailable|access denied|policy reject|permanent(?:ly)? (?:fail|den))`)
+	splitRcptRe   = regexp.MustCompile(`[;,]`)
 )
 
 func isDeliveryAgentMainAction(entry Entry) bool {
@@ -192,8 +193,20 @@ func deriveQuery(in DeliveryQuery) derivedQuery {
 	return q
 }
 
+func matchesProxyConditions(entry Entry, derived derivedQuery) bool {
+	withoutSubject := derived
+	withoutSubject.Subject = ""
+	if !matchesDeliveryConditions(entry, withoutSubject) {
+		return false
+	}
+	return derived.Subject == "" || strings.TrimSpace(entry.Subject) == "" || strings.Contains(strings.ToLower(entry.Subject), strings.ToLower(derived.Subject))
+}
+
 func matchesDeliveryConditions(entry Entry, derived derivedQuery) bool {
-	if derived.Sender != "" && strings.ToLower(entry.Sender) != strings.ToLower(derived.Sender) {
+	if derived.MsgID != "" && !strings.EqualFold(strings.TrimSpace(entry.Tid), strings.TrimSpace(derived.MsgID)) && !strings.EqualFold(strings.TrimSpace(entry.MessageID), strings.TrimSpace(derived.MsgID)) {
+		return false
+	}
+	if derived.Sender != "" && ExtractAddr(entry.Sender) != ExtractAddr(derived.Sender) {
 		return false
 	}
 	if derived.Recipient != "" {
@@ -330,6 +343,52 @@ func aggregatePeerRows(entries []Entry, direction, source string) []Entry {
 				rows[key] = out
 			}
 		}
+	}
+	out := make([]Entry, 0, len(order))
+	for _, key := range order {
+		out = append(out, rows[key])
+	}
+	sortEntriesDesc(out)
+	return out
+}
+
+func aggregateProxyRows(entries []Entry) []Entry {
+	rows := map[string]Entry{}
+	order := []string{}
+	for i, entry := range entries {
+		peer := strings.TrimSpace(entry.Sender)
+		if peer == "" {
+			continue
+		}
+		tid := strings.ToLower(strings.TrimSpace(entry.Tid))
+		aggregateID := "tid:" + tid
+		if tid == "" {
+			aggregateID = "record:" + itoa(i)
+		}
+		key := aggregateID + "\x00" + strings.ToLower(peer)
+		raw := strings.ToLower(strings.Join(nonEmpty(entry.Result, entry.Errinfo), " "))
+		rejected := proxyRejectRe.MatchString(raw)
+		current, exists := rows[key]
+		currentRejected := current.DeliveryStatus == "failed"
+		if exists && ((!rejected && currentRejected) || (rejected == currentRejected && entry.TimestampISO < current.TimestampISO)) {
+			continue
+		}
+		out := entry
+		out.Peer = peer
+		out.StatusSource = "proxy"
+		out.FailureReason = ""
+		if rejected {
+			out.DeliveryStatus = "failed"
+			out.StatusText = "邮件已被我方入口拒绝"
+			out.FailureReason = friendlyBounceReason(entry)
+		} else {
+			out.DeliveryStatus = "unknown"
+			out.StatusText = "邮件后续处理状态异常，请联系客服进一步核实"
+		}
+		if !exists {
+			order = append(order, key)
+		}
+		rows[key] = out
 	}
 	out := make([]Entry, 0, len(order))
 	for _, key := range order {
