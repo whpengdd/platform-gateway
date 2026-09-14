@@ -35,6 +35,27 @@ func NewWriter(dir string) (*Writer, error) {
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return nil, err
 	}
+	// Exercise permissions under the actual process identity before listening.
+	probe, err := os.CreateTemp(dir, ".gateway-write-probe-*")
+	if err != nil {
+		return nil, err
+	}
+	closeErr := probe.Close()
+	removeErr := os.Remove(probe.Name())
+	if closeErr != nil {
+		return nil, closeErr
+	}
+	if removeErr != nil {
+		return nil, removeErr
+	}
+	day := time.Now().In(Shanghai()).Format("2006-01-02")
+	current, err := os.OpenFile(filepath.Join(dir, "platform-gateway-"+day+".jsonl"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o640)
+	if err != nil {
+		return nil, err
+	}
+	if err := current.Close(); err != nil {
+		return nil, err
+	}
 	w := &Writer{
 		dir:  dir,
 		loc:  Shanghai(),

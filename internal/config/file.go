@@ -25,37 +25,33 @@ type Project struct {
 }
 type File struct {
 	Tokens []Token `json:"tokens"`
-	Jira   *struct {
-		Projects map[string]Project `json:"projects"`
-	} `json:"jira,omitempty"`
+	Jira   *Jira   `json:"jira,omitempty"`
+	CKLogs CKLogs  `json:"cklogs,omitempty"`
+	Server Server  `json:"server,omitempty"`
+	Audit  Audit   `json:"audit,omitempty"`
 }
 
 var ProjectKey = regexp.MustCompile(`^[A-Z][A-Z0-9_]{0,63}$`)
 var CustomField = regexp.MustCompile(`^customfield_[0-9]+$`)
 var NumericID = regexp.MustCompile(`^[1-9][0-9]{0,63}$`)
 var DefaultReadFields = []string{"summary", "status", "updated", "reporter", "creator", "assignee"}
-var ErrConfig = errors.New("invalid gateway authorization configuration")
-var LegacyKeys = []string{"GATEWAY_TOKEN_EXTERNAL", "GATEWAY_TOKEN_INTERNAL", "GATEWAY_AUTH_TOKENS", "GATEWAY_JIRA_TOKENS", "GATEWAY_JIRA_TOKENS_FILE"}
+var ErrConfig = errors.New("invalid gateway application configuration")
 
 func Load() (*File, error) {
-	for _, key := range LegacyKeys {
-		if os.Getenv(key) != "" {
-			return nil, errors.New("legacy inbound authorization environment conflicts with file configuration")
-		}
-	}
-	path := os.Getenv("GATEWAY_AUTH_FILE")
+	path := os.Getenv("GATEWAY_CONFIG_FILE")
 	if path == "" {
 		path = "./config.json"
 	}
+
 	b, err := os.ReadFile(path)
 	if err != nil {
-		return nil, errors.New("cannot read gateway authorization file")
+		return nil, errors.New("cannot read gateway application file")
 	}
 	return Parse(b)
 }
 func Parse(b []byte) (*File, error) {
-	var f File
-	if len(b) > 1<<20 || strictjson.Decode(b, &f) != nil || len(f.Tokens) == 0 {
+	f := defaults()
+	if len(b) > 1<<20 || strictjson.DecodeNumbers(b, &f) != nil || !typedValuesPresent(b) || len(f.Tokens) == 0 {
 		return nil, ErrConfig
 	}
 	var raw struct {
@@ -123,6 +119,10 @@ func Parse(b []byte) (*File, error) {
 				}
 				seenFields[field] = true
 			}
+			defaultsJSON, err := json.Marshal(p.CreateDefaults)
+			if err != nil || strictjson.CheckNumbers(defaultsJSON) != nil {
+				return nil, ErrConfig
+			}
 			for field := range p.CreateDefaults {
 				if !CreateField(field) {
 					return nil, ErrConfig
@@ -130,6 +130,9 @@ func Parse(b []byte) (*File, error) {
 			}
 			f.Jira.Projects[key] = p
 		}
+	}
+	if err := f.validateApplication(b); err != nil {
+		return nil, err
 	}
 	return &f, nil
 }

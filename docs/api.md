@@ -6,7 +6,7 @@
 
 鉴权：`Authorization: Bearer <token>`。无 token / 错 token → 401。`GET /health`、`GET /ready` 不鉴权。
 
-Token 使用不透明 Bearer 值。网关从工作目录 ./config.json 读取，GATEWAY_AUTH_FILE 可覆盖路径。调用方仍从自己的环境变量发送原 Bearer 值。
+Token 使用不透明 Bearer 值。网关从工作目录 ./config.json 读取，GATEWAY_CONFIG_FILE 可覆盖路径。调用方仍从自己的环境变量发送原 Bearer 值。
 
 ## 0. 凭据与迁移
 
@@ -19,7 +19,7 @@ Token 使用不透明 Bearer 值。网关从工作目录 ./config.json 读取，
 | 自助 Runtime | PLATFORM_GATEWAY_TOKEN，保持与 external 条目值相同 |
 | Worker / Factory | PLATFORM_GATEWAY_INTERNAL_TOKEN，保持与 internal 条目值相同 |
 
-完整 JSON 与步骤见 [迁移文档](gateway-auth.md)。旧 GATEWAY_TOKEN_EXTERNAL、GATEWAY_TOKEN_INTERNAL、GATEWAY_AUTH_TOKENS 必须从网关环境删除；旧 AUTH_TOKENS 每个值迁为 external。调用方变量名和值可以保留。
+完整 JSON 与步骤见 [迁移文档](gateway-auth.md)。旧入站环境变量不再参与配置或授权；原 AUTH_TOKENS 每个值迁为 external。调用方变量名和值可以保留。
 
 裸机默认读取 app-root/config.json，容器工作目录为 /，只读挂载宿主文件至 /config.json。确保 UID 65532 可读。修改后执行 docker compose up -d --force-recreate --no-deps platform-gateway；裸机重启进程。文件不提交 Git、不进入镜像。调用方仓库的旧 token 配对脚本未修改。
 
@@ -52,12 +52,12 @@ curl -sS -X POST "$GW/v1/cklogs/analysis/delivery" \
 |---|---|
 | 401 `unauthorized` | 没带 Bearer，或 token 不在 gateway 名单 |
 | 403 `token_scope_forbidden` | token 有效但是外网档，不能打 `analysis/*` |
-| 403 `forbidden` | 配了 `GATEWAY_ALLOW_CIDRS` 且来源 IP 不在范围内 |
+| 403 `forbidden` | 配了 `server.allowCidrs` 且来源 IP 不在范围内 |
 | 400 | JSON 字段不在白名单，或缺 `account` / `tid` 等 |
 | 503 `gateway_busy` | 共享 Kibana 队列已满，附带 `Retry-After`（秒） |
 | 503 `gateway_queue_timeout` | 等待共享 Kibana 队列超时 |
 
-自助与内部分析接口共享并发上限和 FIFO 等待队列。容器环境变量 `CKLOGS_MAX_CONCURRENCY`（默认 2）、`CKLOGS_QUEUE_SIZE`（默认 32）、`CKLOGS_QUEUE_WAIT_MS`（默认 30000）控制并发数、等待容量和最长排队时间。请求取消时退出队列，执行超时从取得并发槽后起算；多容器分别计数。
+自助与内部分析接口共享并发上限和 FIFO 等待队列。JSON 字段 `cklogs.queue.maxConcurrency`（默认 2）、`size`（默认 32）、`waitTimeoutMs`（默认 30000）控制并发数、等待容量和最长排队时间。请求取消时退出队列，执行超时从取得并发槽后起算；多容器分别计数。
 
 ---
 
@@ -119,7 +119,7 @@ curl -sS -X POST "$GW/v1/cklogs/delivery" \
 
 ## 3. 日志
 
-每日文件：`$GATEWAY_LOG_DIR/platform-gateway-YYYY-MM-DD.jsonl`（日期按 Asia/Shanghai）。
+每日文件：`<audit.dir>/platform-gateway-YYYY-MM-DD.jsonl`（日期按 Asia/Shanghai）。
 
 有 `operation`、`token_class`（`external`\|`internal`）、白名单条件、每次 Kibana 调用耗时。不写 token 明文、不写命中行正文、不写数据库。
 

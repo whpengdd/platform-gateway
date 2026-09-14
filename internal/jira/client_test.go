@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"platform-gateway/internal/config"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -125,5 +126,53 @@ func TestBasicAndEncoding(t *testing.T) {
 	c.pass = "pass"
 	if err := c.JSON(context.Background(), "GET", "field", url.Values{"text": {`a & "b"`}}, nil, nil, false); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestFileAuthenticationSharedContextSearch(t *testing.T) {
+	for _, mode := range []string{"bearer", "basic"} {
+		t.Run(mode, func(t *testing.T) {
+			calls := 0
+			up := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				if r.URL.Path != "/jira/rest/api/2/search" {
+					t.Error("context path", r.URL.Path)
+				}
+				if mode == "bearer" {
+					if r.Header.Get("Authorization") != "Bearer upstream-$token" {
+						t.Error("bearer")
+					}
+				} else {
+					user, pass, ok := r.BasicAuth()
+					if !ok || user != "user" || pass != " $'\" " {
+						t.Error("basic bytes")
+					}
+				}
+				io.WriteString(w, `{"startAt":0,"total":0,"issues":[]}`)
+			}))
+			defer up.Close()
+			auth := `{"type":"bearer","token":"upstream-$token"}`
+			if mode == "basic" {
+				auth = `{"type":"basic","username":"user","password":" $'\" "}`
+			}
+			f, err := config.Parse([]byte(`{"tokens":[{"token":"inbound","jiraProjects":["CS","IT"]}],"jira":{"baseUrl":"` + up.URL + `/jira/","auth":` + auth + `,"projects":{"CS":{},"IT":{}}}}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			a := f.Jira.Auth
+			c, err := NewClient(f.Jira.BaseURL, a.Token, a.Username, a.Password)
+			if err != nil {
+				t.Fatal(err)
+			}
+			c.http = up.Client()
+			for project := range f.Jira.Projects {
+				if _, err := c.Search(context.Background(), "project = "+project, []string{"summary"}, 0, 10); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if calls != 2 {
+				t.Fatal("shared upstream calls", calls)
+			}
+		})
 	}
 }

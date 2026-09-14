@@ -1,13 +1,41 @@
-// Emit an ephemeral override, without modifying the caller repository.
+// Emit a static migration overlay. !reset removes only dedicated mappings;
+// Compose still delivers env_file and unrelated environment entries unchanged.
 import fs from 'node:fs';
 import path from 'node:path';
 const [stack, source] = process.argv.slice(2);
-if (!['install', '149'].includes(stack) || !source || !fs.statSync(source).isFile()) throw new Error('valid stack and authorization file required');
+if (!['install', '149'].includes(stack) || !source || !fs.statSync(source).isFile()) throw new Error('valid stack and configuration file required');
 const service = stack === '149' ? 'rag-explorer-platform-gateway' : 'platform-gateway';
-const environment = { GATEWAY_AUTH_FILE: '/config.json' };
-for (const key of ['GATEWAY_TOKEN_EXTERNAL', 'GATEWAY_TOKEN_INTERNAL', 'GATEWAY_AUTH_TOKENS', 'GATEWAY_JIRA_TOKENS', 'GATEWAY_JIRA_TOKENS_FILE']) environment[key] = '';
-// Compose resolves these references from the selected project environment.
-// Keep values out of this temporary file and let the gateway validate auth mode.
-for (const key of ['JIRA_BASE_URL', 'JIRA_API_TOKEN', 'JIRA_BASIC_USER', 'JIRA_BASIC_PASSWORD']) environment[key] = '${' + key + ':-}';
-// JSON is valid YAML. Compose merges this mount by container target.
-process.stdout.write(JSON.stringify({ services: { [service]: { working_dir: '/', environment, volumes: [{ type: 'bind', source: path.resolve(source), target: '/config.json', read_only: true, bind: { create_host_path: false } }] } } }));
+process.stdout.write(`services:
+  ${service}:
+    working_dir: /
+    environment:
+      GATEWAY_CONFIG_FILE: /config.json
+      GATEWAY_AUTH_FILE: !reset null
+      GATEWAY_TOKEN_EXTERNAL: !reset null
+      GATEWAY_TOKEN_INTERNAL: !reset null
+      GATEWAY_AUTH_TOKENS: !reset null
+      GATEWAY_JIRA_TOKENS: !reset null
+      GATEWAY_JIRA_TOKENS_FILE: !reset null
+      JIRA_BASE_URL: !reset null
+      JIRA_API_TOKEN: !reset null
+      JIRA_BASIC_USER: !reset null
+      JIRA_BASIC_PASSWORD: !reset null
+      CK_LOGS_BASE_URL: !reset null
+      CK_LOGS_BASIC_USER: !reset null
+      CK_LOGS_BASIC_PASS: !reset null
+      CK_LOGS_INDEX: !reset null
+      CK_LOGS_TIMEOUT_MS: !reset null
+      CKLOGS_MAX_CONCURRENCY: !reset null
+      CKLOGS_QUEUE_SIZE: !reset null
+      CKLOGS_QUEUE_WAIT_MS: !reset null
+      LISTEN_ADDR: !reset null
+      GATEWAY_ALLOW_CIDRS: !reset null
+      GATEWAY_LOG_DIR: !reset null
+    volumes:
+      - type: bind
+        source: ${JSON.stringify(path.resolve(source)).replaceAll('$', '$$')}
+        target: /config.json
+        read_only: true
+        bind:
+          create_host_path: false
+`);

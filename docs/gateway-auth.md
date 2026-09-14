@@ -1,19 +1,27 @@
-# 网关统一 token 配置
+# 网关统一应用配置
 
 状态：本仓文件认证已实现；生产部署和调用方迁移另行执行。Jira 业务合同见 [jira-api.md](jira-api.md)，当前 cklogs 合同见 [api.md](api.md)。
 
 ## 1. 一个文件管理 cklogs/Jira token 和项目过滤
 
-所有入站 token 只从一个 JSON 文件读取。默认读取进程工作目录下的 `./config.json`，不是可执行文件所在目录。使用默认位置时无需设置环境变量；需要覆盖路径时可设置：
+所有入站 token、上游连接、监听、CIDR、队列和审计设置只从一个 JSON 文件读取。默认读取进程工作目录下的 `./config.json`，不是可执行文件所在目录。使用默认位置时无需设置环境变量；需要覆盖路径时可设置：
 
 ```dotenv
-GATEWAY_AUTH_FILE=/custom/path/config.json
+GATEWAY_CONFIG_FILE=/custom/path/config.json
 ```
 
 环境变量只指定路径，不再传 token 或项目列表。完整示例见 [gateway-auth.example.json](gateway-auth.example.json)：
 
 ```json
 {
+  "server": {
+    "listenAddr": ":8091",
+    "allowCidrs": []
+  },
+  "audit": {
+    "enabled": true,
+    "dir": "/var/log/platform-gateway"
+  },
   "tokens": [
     {
       "token": "<ck-external-token>",
@@ -38,6 +46,11 @@ GATEWAY_AUTH_FILE=/custom/path/config.json
     }
   ],
   "jira": {
+    "baseUrl": "https://jira.example.com/jira",
+    "auth": {
+      "type": "bearer",
+      "token": "<jira-upstream-token>"
+    },
     "projects": {
       "CS": {
         "filterJql": "labels = zammad",
@@ -63,6 +76,21 @@ GATEWAY_AUTH_FILE=/custom/path/config.json
         ]
       },
       "IT": {}
+    }
+  },
+  "cklogs": {
+    "baseUrl": "https://ck-logs.icoremail.net",
+    "auth": {
+      "type": "basic",
+      "username": "<user>",
+      "password": "<password>"
+    },
+    "index": "mtatrans_distributed",
+    "timeoutMs": 60000,
+    "queue": {
+      "maxConcurrency": 2,
+      "size": 32,
+      "waitTimeoutMs": 30000
     }
   }
 }
@@ -116,8 +144,8 @@ readFields 默认 summary/status/updated/reporter/creator/assignee；description
 - token 不能为空或包含空白；示例占位符拒绝。缺少权限、同时声明两类权限、非法 cklogs 值或空 jiraProjects 均拒绝。
 - Jira project key 使用 `[A-Z][A-Z0-9_]{0,63}`；禁止通配符和重复项目，引用未配置的业务项目时启动失败。
 - 整个文件加载校验通过后才启用；修改 token、项目或 cklogs 档位后重启生效。第一版不做热更新和管理后台。
-- 不支持 token 环境变量与文件混用；新实现遇到非空 GATEWAY_TOKEN_EXTERNAL、GATEWAY_TOKEN_INTERNAL、GATEWAY_AUTH_TOKENS、GATEWAY_JIRA_TOKENS 或 GATEWAY_JIRA_TOKENS_FILE 时明确报配置冲突，不回退或合并。后两项只是早期设计变量，从未实现。
-- 没有 Jira 条目时 Jira 模块不启用，也不要求 Jira 上游配置；只有 Jira 条目时不要求 cklogs 凭据。有对应条目时才校验该服务的必需配置。全局 readiness 检查所有已启用模块的配置是否就绪；上游诊断走各业务模块，不把未启用服务算作失败。
+- 不读取、不检测、不告警残留旧应用环境变量；旧值不覆盖文件、不参与授权，也不阻止启动。不提供兼容别名或回退。
+- 没有 Jira 条目时 Jira 模块不启用，也不要求 Jira 上游配置；只有 Jira 条目时不要求 cklogs 凭据。没有对应条目时仅豁免缺失的必需字段，显式提供的设置仍校验。全局 readiness 检查所有已启用模块的配置是否就绪；上游诊断走各业务模块，不把未启用服务算作失败。
 
 错误行为：缺少或未知 token → 401 unauthorized；已知 token 访问另一服务，或 external 访问 analysis → 403 token_scope_forbidden；Jira token 访问未授权项目 → 403 project_access_forbidden。任何有效 token 都不能自动通过所有业务入口。
 
@@ -131,6 +159,8 @@ readFields 默认 summary/status/updated/reporter/creator/assignee；description
 services:
   platform-gateway:
     working_dir: /
+    environment:
+      GATEWAY_CONFIG_FILE: /config.json
     volumes:
       - type: bind
         source: ./config.json
@@ -140,7 +170,7 @@ services:
           create_host_path: false
 ```
 
-这里宿主机 source 相对 Compose 文件解析；容器工作目录显式设为 `/`，因此默认 `./config.json` 对应 `/config.json`。不需要设置 GATEWAY_AUTH_FILE，也不把真实文件 COPY 进镜像。创建容器前先准备宿主文件，缺文件报错，不自动创建同名目录。保留服务原有日志等挂载。
+这里宿主机 source 相对 Compose 文件解析；容器工作目录显式设为 `/`，因此默认 `./config.json` 对应 `/config.json`。部署声明显式设置 GATEWAY_CONFIG_FILE=/config.json，也不把真实文件 COPY 进镜像。创建容器前先准备宿主文件，缺文件报错，不自动创建同名目录。保留服务原有日志等挂载。
 
 当前镜像以 UID 65532 的 nonroot 用户运行，宿主文件须通过匹配的属主/组权限让该用户可读，不必向其他用户开放读取。已将真实 `/config.json` 排除出 Git 和 Docker 构建上下文；本仓只保存不含凭据的示例。
 
@@ -152,24 +182,51 @@ docker compose up -d --force-recreate --no-deps platform-gateway
 
 这样修改 token/项目无需重新构建镜像；裸机修改文件后重启 gateway 进程即可。
 
-config.json 统一管理入站 token 和 jira.projects 项目规则。以下配置仍保留环境变量方式：
+## 6. 上游、默认值与部署迁移
 
-- CK_LOGS_BASE_URL、CK_LOGS_BASIC_USER/PASS：网关调用 Kibana 的地址和凭据。
-- JIRA_BASE_URL 及 JIRA_API_TOKEN（或 JIRA_BASIC_USER/PASSWORD）：上游地址/凭据；不与入站 token 混用。
-- LISTEN_ADDR、GATEWAY_ALLOW_CIDRS、日志与队列参数：继续使用环境变量，全局来源限制继续生效。
+所有 Jira 项目共用 `jira.baseUrl`（HTTPS，允许 `/jira` 部署路径，不能包含 REST API 后缀）及一组上游凭据。客户端追加 `/rest/api/2/...`。Basic 方式须将整个 `jira.auth` 替换为：
 
-迁移步骤（部署新版时执行）：
+```json
+{"type": "basic", "username": "<jira-user>", "password": "<jira-password>"}
+```
 
-1. 把 GATEWAY_TOKEN_EXTERNAL 中每一枚 token 写成一个 external 条目，把 GATEWAY_TOKEN_INTERNAL 写成 internal 条目。仅使用旧 GATEWAY_AUTH_TOKENS 时，全部迁为 external。
-2. 若旧配置中同一个值重复或横跨内外档，先消除重复；横跨档位应拆成不同凭据并同步调用方，不能依赖旧代码“internal 优先”的行为继续运行。
-3. 增加独立 Jira token 及项目列表；把宿主 ./config.json 按只读方式挂载到容器 /config.json，使用默认路径即可。
-4. 从 gateway 的环境、Compose 显式 environment 和部署脚本移除旧 token 变量，然后重启新版服务。回归 external/internal 的允许、拒绝和跨服务拒绝路径。
-5. 原 cklogs token 值未变时，调用方的 PLATFORM_GATEWAY_TOKEN / PLATFORM_GATEWAY_INTERNAL_TOKEN 无需改名或换值；它们仍通过 Authorization: Bearer 调用。Jira 调用方也只持有自己的 Bearer token。
+Bearer 与 Basic 字段不能混用；凭据必须非空且不能含 CR/LF。JSON 解码后的美元符号、引号和空格原样使用，没有 shell source 或环境插值。CKLogs 只支持 Basic。服务是否启用由 tokens 决定。
 
-原 rag-explorer-ai token 配对脚本只懂旧网关环境变量；部署切换时须同步其生成文件的方式，或由运维维护此文件。本次不修改该调用方仓库或 Zammad。
+| 可选字段 | 缺失时默认值 |
+|---|---|
+| server.listenAddr / allowCidrs | :8091 / []（不限制来源） |
+| audit.enabled / dir | true / logs |
+| cklogs.baseUrl / index | https://ck-logs.icoremail.net / mtatrans_distributed |
+| cklogs.timeoutMs | 60000 |
+| cklogs.queue.maxConcurrency / size / waitTimeoutMs | 2 / 32 / 30000 |
 
-本配置不改变 cklogs 路径、请求体、返回体、external/internal 权限关系和共享队列。新增验证应覆盖文件错误、旧变量冲突、多 token、重复 token、缺权限及 cklogs/Jira 双向越权。
+只有缺失使用默认值。未知/重复键、typed null、错误类型、非法 CIDR、监听地址和超过 1 MiB 的文件拒绝。时间为正整数毫秒：timeoutMs 最大 9223372031854（HTTP 客户端额外加 5 秒），waitTimeoutMs 最大 9223372036854。队列 size 可为 0；并发必须 >= 1。createDefaults 保留既有数字保真限制，接受的数字以 json.Number 保存而不转为 float64。
 
-createDefaults 的数字不做静默舍入：仅接受 float64/JSON 往返保持数值的表示；不能保真的值会拒绝加载。客户端同样拒绝不能保真的数字，已支持的同值形式（如 1 与 1.0）可通过默认值一致性比较。
+宿主配置将 `server.listenAddr` 改为 `127.0.0.1:8091`，`audit.dir` 可设为 `logs/platform-gateway`。相对审计路径相对进程工作目录，**不相对配置文件目录**；host launcher 的 cwd 是 app-root，配置路径默认 app-root/config.json。`--config-file` 相对 app-root 解析，或使用绝对路径。宿主健康探测使用文件内监听地址和端口。
 
-本仓 install/149 部署 overlay 显式透传 JIRA_BASE_URL、JIRA_API_TOKEN、JIRA_BASIC_USER、JIRA_BASIC_PASSWORD；在对应 Compose 项目的环境文件或宿主环境中配置。临时 overlay 只包含变量引用，实际凭据不写入该文件。
+容器示例监听 `:8091`，审计目录 `/var/log/platform-gateway` 必须对应可写挂载。提前创建审计宿主目录并授予 UID/GID 65532 所需的写入权限。self Compose 可用 PLATFORM_GATEWAY_HOST_PORT、PLATFORM_GATEWAY_CONTAINER_PORT 调整端口映射（后者必须匹配 JSON），用 PLATFORM_GATEWAY_LOG_HOST_DIR 指定日志宿主目录。app-stack 的端口/日志挂载由基础 Compose 声明；健康探测宿主端口可通过 PLATFORM_GATEWAY_HOST_PORT 指定，不覆盖 JSON。
+
+`audit.enabled=false` 关闭 JSONL 审计，不创建审计目录、不进行写入检查；普通 stdout/stderr 日志仍保留，host launcher 写 app-root/gateway.log。`audit.dir` 的 off 和 - 只是路径，不是关闭别名。启用审计时，启动前必须能在目录创建临时文件并追加打开当日日志，否则拒绝启动；不会截断旧日志、写入伪记录或遗留探测文件。容器运行时可能为 Compose 声明的绑定挂载准备宿主目录；关闭审计且无需该挂载时可从部署声明移除日志挂载。
+
+迁移字段表仅供人工更新部署，不是运行时旧环境检测列表：
+
+| 旧设置 | 新设置 |
+|---|---|
+| JIRA_BASE_URL | jira.baseUrl |
+| JIRA_API_TOKEN | jira.auth.type=bearer / token |
+| JIRA_BASIC_USER / JIRA_BASIC_PASSWORD | jira.auth.type=basic / username / password |
+| CK_LOGS_BASE_URL | cklogs.baseUrl |
+| CK_LOGS_BASIC_USER / CK_LOGS_BASIC_PASS | cklogs.auth.type=basic / username / password |
+| CK_LOGS_INDEX / CK_LOGS_TIMEOUT_MS | cklogs.index / timeoutMs |
+| CKLOGS_MAX_CONCURRENCY / CKLOGS_QUEUE_SIZE / CKLOGS_QUEUE_WAIT_MS | cklogs.queue.maxConcurrency / size / waitTimeoutMs |
+| LISTEN_ADDR / GATEWAY_ALLOW_CIDRS | server.listenAddr / allowCidrs（字符串数组） |
+| GATEWAY_LOG_DIR | audit.dir；关闭使用 audit.enabled=false |
+| GATEWAY_AUTH_FILE | GATEWAY_CONFIG_FILE |
+| PLATFORM_GATEWAY_AUTH_HOST_FILE | PLATFORM_GATEWAY_CONFIG_HOST_FILE |
+| --auth-file / --listen | --config-file / server.listenAddr |
+
+旧入站 GATEWAY_TOKEN_EXTERNAL、GATEWAY_TOKEN_INTERNAL 分别迁为 external/internal 条目；GATEWAY_AUTH_TOKENS 中每项迁为 external。消除重复 token，跨服务必须用不同凭据。调用方的 PLATFORM_GATEWAY_TOKEN / PLATFORM_GATEWAY_INTERNAL_TOKEN 及现有 Bearer 请求无需改变。
+
+本次仅删除已迁入文件的重复应用配置处理；保留 env_file、宿主继承环境及无关 environment，不限制未来独立环境变量功能。残留旧值可以透传，但不生效。CKLogs 保留 HTTP_PROXY/HTTPS_PROXY/NO_PROXY 行为，Jira 继续直连；证书变量交给运行时处理。host 环境文件通用读取为字面 KEY=VALUE，不经 shell 执行。install/149 overlay 用 Compose `!reset` 删除基础服务的旧专用映射，保留 env_file 和无关映射；要求支持 `!reset` 的 Compose（验证版本 2.26.1）。
+
+切换时同时更新镜像/二进制、完整 JSON 和部署脚本，核对监听、挂载和文件权限后重启/重建容器。只修改 JSON 不需要重建镜像，但原子替换文件后必须 recreate。回退也必须同时恢复旧版本镜像、旧格式文件与旧部署脚本。旧二进制不能读新字段，新版本没有双格式兼容期。本次不修改调用方业务 API，也不执行生产部署。

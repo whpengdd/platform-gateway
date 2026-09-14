@@ -33,4 +33,6 @@ JQL 存在索引延迟和检查/写入竞态；不提供即时撤权、事务授
 
 ## 独立复评修复验证
 
-最新修复及验证结果见 [修复记录](../openspec/changes/add-project-scoped-jira-gateway/remediation.md)。回归包含真实慢读 TCP、完整 multipart HTTP body、数字保真/冲突、时间参数存在性、正向多项目/评论/续页，以及实际容器环境变量检查。
+最新修复及验证结果见 [修复记录](../openspec/changes/archive/2026-09-14-add-project-scoped-jira-gateway/remediation.md)。回归包含真实慢读 TCP、完整 multipart HTTP body、数字保真/冲突、时间参数存在性、正向多项目/评论/续页，以及实际容器环境变量检查。
+
+统一应用文件配置的最新验证见 [配置迁移验证](../openspec/changes/unify-gateway-file-config/verification.md)。

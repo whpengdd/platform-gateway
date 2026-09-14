@@ -2,13 +2,11 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -123,93 +121,32 @@ func loadConfig() (config, error) {
 	if err != nil {
 		return config{}, err
 	}
-	maxConc, queueSize, queueWaitMS := 2, 32, 30000
-	if authFile.Enabled("cklogs") {
-		maxConc, err = envIntMin("CKLOGS_MAX_CONCURRENCY", 2, 1)
-		if err != nil {
-			return config{}, err
-		}
-		queueSize, err = envIntMin("CKLOGS_QUEUE_SIZE", 32, 0)
-		if err != nil {
-			return config{}, err
-		}
-		queueWaitMS, err = envIntMin("CKLOGS_QUEUE_WAIT_MS", 30000, 1)
-		if err != nil {
-			return config{}, err
-		}
-		if int64(queueWaitMS) > int64((1<<63-1)/time.Millisecond) {
-			return config{}, fmt.Errorf("CKLOGS_QUEUE_WAIT_MS exceeds the supported duration")
-		}
-	}
-	cidrs, err := auth.ParseCIDRs(os.Getenv("GATEWAY_ALLOW_CIDRS"))
+	cidrs, err := auth.ParseCIDRs(strings.Join(authFile.Server.AllowCIDRs, ","))
 	if err != nil {
 		return config{}, err
 	}
-	if authFile.Enabled("cklogs") && (strings.TrimSpace(os.Getenv("CK_LOGS_BASIC_USER")) == "" || strings.TrimSpace(os.Getenv("CK_LOGS_BASIC_PASS")) == "") {
-		return config{}, fmt.Errorf("cklogs credentials required")
-	}
 	var jiraClient *jira.Client
 	if authFile.Enabled("jira") {
-		jiraClient, err = jira.NewClient(os.Getenv("JIRA_BASE_URL"), os.Getenv("JIRA_API_TOKEN"), os.Getenv("JIRA_BASIC_USER"), os.Getenv("JIRA_BASIC_PASSWORD"))
+		j := authFile.Jira
+		jiraClient, err = jira.NewClient(j.BaseURL, j.Auth.Token, j.Auth.Username, j.Auth.Password)
 		if err != nil {
 			return config{}, err
 		}
 	}
+	c := authFile.CKLogs
+	var user, pass string
+	if c.Auth != nil {
+		user, pass = c.Auth.Username, c.Auth.Password
+	}
+	dir := ""
+	if authFile.Audit.Enabled {
+		dir = authFile.Audit.Dir
+	}
 	return config{
-		listen:     envOr("LISTEN_ADDR", ":8091"),
-		authFile:   authFile,
-		jiraClient: jiraClient,
-		cidrs:      cidrs,
-		logDir:     logDir(),
-		ckBase:     envOr("CK_LOGS_BASE_URL", cklogs.DefaultBaseURL),
-		ckUser:     strings.TrimSpace(os.Getenv("CK_LOGS_BASIC_USER")),
-		ckPass:     strings.TrimSpace(os.Getenv("CK_LOGS_BASIC_PASS")),
-		ckIndex:    envOr("CK_LOGS_INDEX", "mtatrans_distributed"),
-		ckTimeout:  time.Duration(envInt("CK_LOGS_TIMEOUT_MS", 60000)) * time.Millisecond,
-		maxConc:    maxConc,
-		queueSize:  queueSize,
-		queueWait:  time.Duration(queueWaitMS) * time.Millisecond,
+		listen: authFile.Server.ListenAddr, authFile: authFile, jiraClient: jiraClient,
+		cidrs: cidrs, logDir: dir, ckBase: c.BaseURL, ckUser: user, ckPass: pass,
+		ckIndex: c.Index, ckTimeout: time.Duration(c.TimeoutMS) * time.Millisecond,
+		maxConc: c.Queue.MaxConcurrency, queueSize: c.Queue.Size,
+		queueWait: time.Duration(c.Queue.WaitTimeoutMS) * time.Millisecond,
 	}, nil
-}
-
-func logDir() string {
-	raw := strings.TrimSpace(os.Getenv("GATEWAY_LOG_DIR"))
-	if raw == "off" || raw == "-" {
-		return ""
-	}
-	if raw == "" {
-		return "logs"
-	}
-	return raw
-}
-
-func envOr(key, def string) string {
-	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
-		return v
-	}
-	return def
-}
-
-func envInt(key string, def int) int {
-	raw := strings.TrimSpace(os.Getenv(key))
-	if raw == "" {
-		return def
-	}
-	n, err := strconv.Atoi(raw)
-	if err != nil {
-		return def
-	}
-	return n
-}
-
-func envIntMin(key string, def, min int) (int, error) {
-	raw := strings.TrimSpace(os.Getenv(key))
-	if raw == "" {
-		return def, nil
-	}
-	n, err := strconv.Atoi(raw)
-	if err != nil || n < min {
-		return 0, fmt.Errorf("%s must be an integer >= %d", key, min)
-	}
-	return n, nil
 }

@@ -12,13 +12,12 @@ MODE=""
 STACK="self"
 APP_ROOT=""
 ENV_FILE=""
-AUTH_FILE="${GATEWAY_AUTH_FILE:-}"
-LISTEN="127.0.0.1:8091"
+CONFIG_FILE="${GATEWAY_CONFIG_FILE:-}"
 HEALTH_URL="http://127.0.0.1:8091/health"
 READY_URL="http://127.0.0.1:8091/ready"
 
 usage() {
-  echo "usage: standalone.sh --mode host|docker [--stack self|install|149] [--app-root DIR] [--env-file FILE]" >&2
+  echo "usage: standalone.sh --mode host|docker [--stack self|install|149] [--app-root DIR] [--env-file FILE] [--config-file FILE]" >&2
   exit 2
 }
 
@@ -27,9 +26,8 @@ while [[ $# -gt 0 ]]; do
     --mode) MODE="${2:-}"; shift 2 ;;
     --stack) STACK="${2:-}"; shift 2 ;;
     --app-root) APP_ROOT="${2:-}"; shift 2 ;;
-    --auth-file) AUTH_FILE="${2:-}"; shift 2 ;;
+    --config-file) CONFIG_FILE="${2:-}"; shift 2 ;;
     --env-file) ENV_FILE="${2:-}"; shift 2 ;;
-    --listen) LISTEN="${2:-}"; shift 2 ;;
     -h|--help) usage ;;
     *) echo "unknown arg: $1" >&2; usage ;;
   esac
@@ -40,8 +38,6 @@ die() { echo "platform-gateway standalone: $*" >&2; exit 1; }
 [[ "$MODE" == "host" || "$MODE" == "docker" ]] || usage
 [[ "$STACK" == "self" || "$STACK" == "install" || "$STACK" == "149" ]] \
   || die "stack must be self|install|149"
-[[ "$LISTEN" == 127.0.0.1:* || "$LISTEN" == localhost:* ]] \
-  || die "LISTEN must be loopback, got $LISTEN"
 
 resolve_go() {
   if command -v go >/dev/null 2>&1; then
@@ -83,9 +79,9 @@ image_name() {
 start_host() {
   require_app_root
   ENV_FILE="${ENV_FILE:-$APP_ROOT/.env.local}"
-  AUTH_FILE="${AUTH_FILE:-$APP_ROOT/config.json}"
-  [[ -f "$AUTH_FILE" && -r "$AUTH_FILE" ]] || die "readable authorization file required"
-  mkdir -p "$APP_ROOT/logs/platform-gateway" "$ROOT/bin"
+  CONFIG_FILE="$(node "$HERE/config-path.mjs" path "$APP_ROOT" "$CONFIG_FILE" "$ENV_FILE")"
+  [[ -f "$CONFIG_FILE" && -r "$CONFIG_FILE" ]] || die "readable configuration file required"
+  mkdir -p "$ROOT/bin"
   local go_bin=""
   if go_bin="$(resolve_go)"; then
     echo "building bin/platform-gateway"
@@ -112,37 +108,36 @@ start_host() {
     --app-root "$APP_ROOT" \
     --gateway-root "$ROOT" \
     --env-file "$ENV_FILE" \
-    --listen "$LISTEN" \
-    --auth-file "$AUTH_FILE" \
+    --config-file "$CONFIG_FILE" \
     --binary "$ROOT/bin/platform-gateway")"
   echo "$pid" > "$pid_file"
-  echo "started host gateway pid=$pid listen=$LISTEN"
+  HEALTH_URL="$(node "$HERE/config-path.mjs" health "$APP_ROOT" "$CONFIG_FILE")"
+  READY_URL="${HEALTH_URL%/health}/ready"
+  echo "started host gateway pid=$pid"
   wait_http "$HEALTH_URL" "/health"
   wait_http "$READY_URL" "/ready"
 }
 
 start_docker_self() {
-  export PLATFORM_GATEWAY_AUTH_HOST_FILE="${AUTH_FILE:-$ROOT/config.json}"
-  [[ -f "$PLATFORM_GATEWAY_AUTH_HOST_FILE" && -r "$PLATFORM_GATEWAY_AUTH_HOST_FILE" ]] || die "readable authorization file required"
-  mkdir -p "$ROOT/logs"
-  docker compose --project-directory "$ROOT" -f "$ROOT/docker-compose.yml" up -d --build
+  export PLATFORM_GATEWAY_CONFIG_HOST_FILE="$(node "$HERE/config-path.mjs" path "$ROOT" "${CONFIG_FILE:-${PLATFORM_GATEWAY_CONFIG_HOST_FILE:-}}" "$ENV_FILE")"
+  [[ -f "$PLATFORM_GATEWAY_CONFIG_HOST_FILE" && -r "$PLATFORM_GATEWAY_CONFIG_HOST_FILE" ]] || die "readable configuration file required"
+  docker compose --project-directory "$ROOT" -f "$ROOT/docker-compose.yml" up -d --build --force-recreate
   echo "started docker platform-gateway stack=self"
-  wait_http "$HEALTH_URL" "/health"
+  wait_http "http://127.0.0.1:${PLATFORM_GATEWAY_HOST_PORT:-8091}/health" "/health"
 }
 
 start_docker_app() {
   require_app_root
+  CONFIG_FILE="$(node "$HERE/config-path.mjs" path "$APP_ROOT" "$CONFIG_FILE" "$ENV_FILE")"
+  [[ -f "$CONFIG_FILE" && -r "$CONFIG_FILE" ]] || die "readable configuration file required"
   local image
   image="$(bash "$HERE/build-image.sh")"
-  AUTH_FILE="${AUTH_FILE:-$APP_ROOT/config.json}"
-  [[ -f "$AUTH_FILE" && -r "$AUTH_FILE" ]] || die "readable authorization file required"
   local overlay
   overlay="$(mktemp)"
   trap 'rm -f "$overlay"' RETURN
-  node "$HERE/compose-auth.mjs" "$STACK" "$AUTH_FILE" > "$overlay"
+  node "$HERE/compose-auth.mjs" "$STACK" "$CONFIG_FILE" > "$overlay"
   export PLATFORM_GATEWAY_IMAGE="$image"
   echo "PLATFORM_GATEWAY_IMAGE=$PLATFORM_GATEWAY_IMAGE"
-  mkdir -p "$APP_ROOT/logs/platform-gateway"
   case "$STACK" in
     install)
       local compose="$APP_ROOT/install/docker-compose.yml"
@@ -161,7 +156,7 @@ start_docker_app() {
       ;;
   esac
   echo "started docker platform-gateway stack=$STACK image=$image"
-  wait_http "$HEALTH_URL" "/health"
+  wait_http "http://127.0.0.1:${PLATFORM_GATEWAY_HOST_PORT:-8091}/health" "/health"
 }
 
 case "$MODE" in

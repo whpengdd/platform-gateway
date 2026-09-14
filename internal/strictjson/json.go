@@ -15,11 +15,16 @@ import (
 
 var ErrInvalid = errors.New("invalid JSON")
 
-func Decode(b []byte, dst any) error {
+func Decode(b []byte, dst any) error { return decode(b, dst, false) }
+
+// DecodeNumbers preserves accepted arbitrary numbers as json.Number.
+func DecodeNumbers(b []byte, dst any) error { return decode(b, dst, true) }
+
+func decode(b []byte, dst any, numbers bool) error {
 	if !utf8.Valid(b) {
 		return ErrInvalid
 	}
-	if CheckNumbers(b) != nil {
+	if checkJSON(b, !numbers) != nil {
 		return ErrInvalid
 	}
 	var tree any
@@ -28,12 +33,15 @@ func Decode(b []byte, dst any) error {
 	}
 	d := json.NewDecoder(bytes.NewReader(b))
 	d.DisallowUnknownFields()
+	if numbers {
+		d.UseNumber()
+	}
 	if err := d.Decode(dst); err != nil {
 		return ErrInvalid
 	}
 	return nil
 }
-func value(d *json.Decoder, depth int) error {
+func value(d *json.Decoder, depth int, checkNumbers bool) error {
 	if depth > 64 {
 		return ErrInvalid
 	}
@@ -41,7 +49,7 @@ func value(d *json.Decoder, depth int) error {
 	if err != nil {
 		return err
 	}
-	if n, ok := t.(json.Number); ok && !numberRoundTrips(n.String()) {
+	if n, ok := t.(json.Number); ok && checkNumbers && !numberRoundTrips(n.String()) {
 		return ErrInvalid
 	}
 	delim, ok := t.(json.Delim)
@@ -61,13 +69,13 @@ func value(d *json.Decoder, depth int) error {
 				return ErrInvalid
 			}
 			seen[key] = true
-			if err := value(d, depth+1); err != nil {
+			if err := value(d, depth+1, checkNumbers); err != nil {
 				return err
 			}
 		}
 	case '[':
 		for d.More() {
-			if err := value(d, depth+1); err != nil {
+			if err := value(d, depth+1, checkNumbers); err != nil {
 				return err
 			}
 		}
@@ -143,10 +151,12 @@ func exactKeys(v any, t reflect.Type) bool {
 // CheckNumbers rejects numbers that float64 decoding and JSON re-encoding would
 // silently change. It also rejects duplicate keys and trailing documents. Jira
 // upstream responses use this without imposing our input field whitelist.
-func CheckNumbers(b []byte) error {
+func CheckNumbers(b []byte) error { return checkJSON(b, true) }
+
+func checkJSON(b []byte, numbers bool) error {
 	d := json.NewDecoder(bytes.NewReader(b))
 	d.UseNumber()
-	if err := value(d, 0); err != nil {
+	if err := value(d, 0, numbers); err != nil {
 		return ErrInvalid
 	}
 	if _, err := d.Token(); err != io.EOF {
