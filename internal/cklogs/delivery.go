@@ -125,33 +125,27 @@ func (s *Service) QuerySelfServiceDelivery(ctx context.Context, in DeliveryQuery
 			}
 		}
 		mtaRows := aggregatePeerRows(matchedMTA, in.Direction, "mta")
-		offset := (page - 1) * pageSize
-		end := offset + pageSize
-		if offset > len(mtaRows) {
-			offset = len(mtaRows)
-		}
-		if end > len(mtaRows) {
-			end = len(mtaRows)
-		}
 		lim := append([]string{}, mta.Limitations...)
 		lim = append(lim, "DATRANS 聚合后零命中，已使用相同发件人、收件人、主题和时间条件回查 MTA。")
-		slice := mtaRows[offset:end]
-		if slice == nil {
-			slice = []Entry{}
+		if in.Direction == "inbound" && len(mtaRows) == 0 {
+			proxy := s.queryProxy(ctx, Filters{
+				Sender:    derived.Sender,
+				Recipient: derived.Recipient,
+				TimeRange: in.TimeRange,
+			}, derived, page, pageSize)
+			if proxy.Status != "ok" {
+				return proxy
+			}
+			proxy.Limitations = append(lim, proxy.Limitations...)
+			if proxy.Total != nil && *proxy.Total == 0 {
+				proxy.Limitations = []string{
+					"DATRANS 聚合后零命中，已使用相同发件人、收件人、主题和时间条件回查 MTA。",
+					"在所选时间范围及查询条件内，未发现发件方向我方系统投递该邮件",
+				}
+			}
+			return proxy
 		}
-		return DeliveryResult{
-			Status:      "ok",
-			Provider:    "log_platform",
-			Code:        mta.Code,
-			Total:       ptrInt(len(mtaRows)),
-			Entries:     slice,
-			Limitations: lim,
-			CountOnly:   ptrBool(false),
-			Page:        page,
-			PageSize:    pageSize,
-			HasMore:     ptrBool(len(mtaRows) > offset+pageSize),
-			Truncated:   ptrBool(false),
-		}
+		return proxyPageResult(mtaRows, page, pageSize, lim)
 	}
 
 	type group struct {

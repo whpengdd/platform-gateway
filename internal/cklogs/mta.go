@@ -85,6 +85,15 @@ func (s *Service) queryMTA(ctx context.Context, filters Filters, derived derived
 				return mtaFailure(fallbackCount)
 			}
 			if fallbackCount.Total > 0 {
+				if requireComplete && fallbackCount.Total > HardSize {
+					return DeliveryResult{
+						Status:      "error",
+						Provider:    "log_platform",
+						Code:        "CK_LOGS_RECIPIENT_FALLBACK_UNRESOLVED",
+						Entries:     []Entry{},
+						Limitations: []string{"收件人精确查询未命中，候选数量超过明细上限，无法完整确认目标收件人是否存在；不能据此断言无记录。"},
+					}
+				}
 				fallbackDetails := s.Client.Query(ctx, fallbackFilters, QueryOptions{PageSize: HardSize})
 				if !fallbackDetails.OK {
 					return DeliveryResult{
@@ -103,17 +112,6 @@ func (s *Service) queryMTA(ctx context.Context, filters Filters, derived derived
 						matched = append(matched, entry)
 					}
 				}
-				if len(matched) > 0 {
-					return DeliveryResult{
-						Status:      "ok",
-						Provider:    "log_platform",
-						Total:       ptrInt(len(matched)),
-						Entries:     matched,
-						Limitations: []string{"收件人精确条件未直接命中；已按发件人/主题/时间取候选，并对 CK 分号拼接收件人做本地完整地址核对。"},
-						CountOnly:   ptrBool(false),
-						HasMore:     ptrBool(fallbackCount.Total > len(fallbackDetails.Entries)),
-					}
-				}
 				if fallbackCount.Total > len(fallbackDetails.Entries) {
 					return DeliveryResult{
 						Status:   "error",
@@ -123,6 +121,17 @@ func (s *Service) queryMTA(ctx context.Context, filters Filters, derived derived
 						Limitations: []string{
 							"收件人精确查询未命中，候选共 " + itoa(fallbackCount.Total) + " 条但明细只返回 " + itoa(len(fallbackDetails.Entries)) + " 条，无法确认目标收件人是否存在；不能据此断言无记录。",
 						},
+					}
+				}
+				if len(matched) > 0 {
+					return DeliveryResult{
+						Status:      "ok",
+						Provider:    "log_platform",
+						Total:       ptrInt(len(matched)),
+						Entries:     matched,
+						Limitations: []string{"收件人精确条件未直接命中；已按发件人/主题/时间取候选，并对 CK 分号拼接收件人做本地完整地址核对。"},
+						CountOnly:   ptrBool(false),
+						HasMore:     ptrBool(false),
 					}
 				}
 			}
@@ -165,6 +174,19 @@ func (s *Service) queryMTA(ctx context.Context, filters Filters, derived derived
 	entries := res.Entries
 	if entries == nil {
 		entries = []Entry{}
+	}
+	if requireComplete && (countRes.Total > len(entries) || res.Total > len(entries)) {
+		return DeliveryResult{
+			Status:      "error",
+			Provider:    "log_platform",
+			Code:        "CK_LOGS_MTA_TRUNCATED",
+			Total:       ptrInt(countRes.Total),
+			Entries:     []Entry{},
+			Limitations: []string{"MTA 明细未完整取回，无法完成本地精确过滤与聚合；本次不返回不完整结果。"},
+			Truncated:   ptrBool(true),
+			CountOnly:   ptrBool(false),
+			HasMore:     ptrBool(false),
+		}
 	}
 	return DeliveryResult{
 		Status:      "ok",

@@ -40,6 +40,7 @@ var datasets = map[string]Dataset{
 	"delivery":          {Index: "mtatrans_distributed", Kind: "delivery"},
 	"delivery_agent":    {Index: "datrans_distributed", Kind: "delivery_agent"},
 	"delivery_pipeline": {Index: "dasvr_distributed", Kind: "delivery_pipeline"},
+	"delivery_proxy":    {Index: "proxytrans_distributed", Kind: "delivery_proxy"},
 	"auth_pop3": {
 		Index:        "pop3trans_distributed",
 		Kind:         "auth",
@@ -185,6 +186,17 @@ func BuildDatasetBody(ds *Dataset, filters Filters, opts QueryOptions) (string, 
 		}
 		if filters.Recipient != "" {
 			filter = append(filter, map[string]any{"term": map[string]any{"to": filters.Recipient}})
+		}
+	}
+	if ds.Kind == "delivery_proxy" {
+		if filters.Sender != "" {
+			filter = append(filter, map[string]any{"term": map[string]any{"from": filters.Sender}})
+		}
+		if filters.Recipient != "" {
+			filter = append(filter, map[string]any{"term": map[string]any{"to": filters.Recipient}})
+		}
+		if filters.Subject != "" {
+			filter = append(filter, map[string]any{"match_phrase": map[string]any{"subject": filters.Subject}})
 		}
 	}
 	if filters.Account != "" && ds.AccountField != "" {
