@@ -45,7 +45,7 @@ func TestTransport(t *testing.T) {
 	if calls.Load() != 1 {
 		t.Fatal(calls.Load())
 	}
-	for _, base := range []string{"http://example.com", "https://user@example.com", "https://example.com/?url=x", "https://example.com/../x"} {
+	for _, base := range []string{"ftp://example.com", "https://user@example.com", "https://example.com/?url=x", "https://example.com/../x"} {
 		if _, err := NewClient(base, "x", "", ""); err == nil {
 			t.Fatal(base)
 		}
@@ -174,5 +174,28 @@ func TestFileAuthenticationSharedContextSearch(t *testing.T) {
 				t.Fatal("shared upstream calls", calls)
 			}
 		})
+	}
+}
+
+func TestHTTPTransport(t *testing.T) {
+	var calls atomic.Int32
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		user, pass, ok := r.BasicAuth()
+		if !ok || user != "bot" || pass != "upstream-secret" || r.URL.Path != "/jira/rest/api/2/issue/123" {
+			t.Error("incorrect HTTP request")
+		}
+		io.WriteString(w, `{"id":"123"}`)
+	}))
+	defer up.Close()
+	c, err := NewClient(up.URL+"/jira", "", "bot", "upstream-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = c.Issue(context.Background(), "123", []string{"summary"}); err != nil {
+		t.Fatal(err)
+	}
+	if calls.Load() != 1 {
+		t.Fatal("HTTP request was not dispatched exactly once")
 	}
 }

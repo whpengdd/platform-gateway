@@ -35,7 +35,7 @@ The gateway SHALL NOT read or inspect obsolete application environment variables
 - **THEN** startup succeeds without inspecting or warning about the variable, and that token grants no access
 
 ### Requirement: Jira projects share a file-configured upstream
-For enabled Jira, jira.baseUrl and jira.auth SHALL be required. All jira.projects SHALL use that one server and authentication object. baseUrl SHALL be an absolute HTTPS server URL allowing a deployment context path, without embedded credentials, query, fragment or unsafe path encoding/traversal; trailing slashes SHALL be normalized. Operators SHALL supply the server URL without the REST API suffix, and the client SHALL append /rest/api/2/... as before. auth.type SHALL be bearer with a nonempty token or basic with nonempty username and password, exclusively; mixed or incomplete credentials and CR/LF in credentials SHALL fail startup. Inbound tokens SHALL remain separate from upstream credentials. The gateway SHALL preserve credential bytes without shell or environment expansion.
+For enabled Jira, jira.baseUrl and jira.auth SHALL be required. All jira.projects SHALL use that one server and authentication object. baseUrl SHALL be an absolute HTTP or HTTPS server URL allowing a deployment context path, without embedded credentials, query, fragment or unsafe path encoding/traversal; trailing slashes SHALL be normalized. Enabled Jira over HTTP SHALL emit a startup warning without rejecting the configuration; the warning SHALL NOT include URL values or credentials. Operators SHALL supply the server URL without the REST API suffix, and the client SHALL append /rest/api/2/... as before. auth.type SHALL be bearer with a nonempty token or basic with nonempty username and password, exclusively; mixed or incomplete credentials and CR/LF in credentials SHALL fail startup. Inbound tokens SHALL remain separate from upstream credentials. The gateway SHALL preserve credential bytes without shell or environment expansion.
 
 #### Scenario: Context path and shared server
 - **WHEN** jira.baseUrl is https://jira.example.test/jira and CS and IT are authorized projects
@@ -117,3 +117,14 @@ The gateway SHALL preserve /v1/jira/projects/... and CKLogs route paths, request
 #### Scenario: Existing caller
 - **WHEN** deployment adopts the new configuration while preserving its inbound token and project policies
 - **THEN** the caller continues using the same API requests and Bearer token
+
+### Requirement: Actionable configuration diagnostics
+Startup configuration failures SHALL identify the configuration file, schema field path or array index, and reason without including input values or arbitrary unknown keys. JSON structural errors SHALL include a nearby byte offset. Errors SHALL preserve ErrConfig identity for errors.Is checks.
+
+#### Scenario: Missing Basic password
+- **WHEN** jira.auth.type is basic and password is missing or empty
+- **THEN** startup fails with jira.auth.password and a required-for-basic explanation, without logging credentials
+
+#### Scenario: HTTP Jira upstream
+- **WHEN** enabled Jira uses a valid HTTP baseUrl
+- **THEN** configuration and transport accept it, startup warns that credentials and data lack TLS encryption, and requests use the configured HTTP origin

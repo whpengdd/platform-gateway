@@ -15,7 +15,7 @@ func TestApplicationValidation(t *testing.T) {
 			t.Errorf("accepted %s", extra)
 		}
 	}
-	for _, extra := range []string{`,"server":null`, `,"server":{"listenAddr":""}`, `,"server":{"listenAddr":":99999"}`, `,"server":{"allowCidrs":["bad"]}`, `,"server":{"allowCidrs":[null]}`, `,"audit":{"enabled":null}`, `,"audit":{"dir":""}`, `,"audit":{"enabled":"false"}`, `,"jira":{"auth":{"type":"basic"}}`, `,"jira":{"baseUrl":"http://jira.test"}`} {
+	for _, extra := range []string{`,"server":null`, `,"server":{"listenAddr":""}`, `,"server":{"listenAddr":":99999"}`, `,"server":{"allowCidrs":["bad"]}`, `,"server":{"allowCidrs":[null]}`, `,"audit":{"enabled":null}`, `,"audit":{"dir":""}`, `,"audit":{"enabled":"false"}`, `,"jira":{"auth":{"type":"basic"}}`, `,"jira":{"baseUrl":"ftp://jira.test"}`} {
 		if _, err := Parse([]byte(fmt.Sprintf(appFixture, "", extra))); err == nil {
 			t.Errorf("accepted %s", extra)
 		}
@@ -36,7 +36,7 @@ func TestAuthenticationAndPaths(t *testing.T) {
 			t.Fatal("mixed/incomplete auth accepted")
 		}
 	}
-	for _, u := range []string{"http://jira.test", "https://jira.test/a/../b", "https://jira.test/%2f", "https://jira.test/?", "https://jira.test/#", "https://u:p@jira.test"} {
+	for _, u := range []string{"ftp://jira.test", "https://jira.test/a/../b", "https://jira.test/%2f", "https://jira.test/?", "https://jira.test/#", "https://u:p@jira.test"} {
 		if _, err := Parse([]byte(fmt.Sprintf(base, u, `{"type":"bearer","token":"tok"}`))); err == nil {
 			t.Fatal("unsafe URL accepted", u)
 		}
