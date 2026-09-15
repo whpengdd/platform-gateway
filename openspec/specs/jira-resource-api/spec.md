@@ -64,7 +64,7 @@ The gateway SHALL use an independent Jira queue with 2 execution slots and 32 wa
 - **THEN** further Jira work receives a controlled busy response and eligible cklogs requests can still run
 
 ### Requirement: Credentials and diagnostics remain inside the gateway
-Jira transport SHALL use the configured HTTPS origin/context path with certificate verification, no redirects and no implicit environment proxy. Client headers SHALL NOT replace upstream credentials or routing. Audit/error output SHALL omit raw tokens, JQL values, issue/comment bodies, attachment contents and upstream error bodies. Service/project/resource error codes SHALL be consistent with the configuration and filtering specs.
+Jira transport SHALL use the configured HTTP or HTTPS origin/context path, with certificate verification for HTTPS, no redirects and no implicit environment proxy. Enabled Jira over HTTP SHALL produce a startup warning about unencrypted credentials and request/response data, without logging the URL or credentials, and SHALL NOT prevent startup. Client headers SHALL NOT replace upstream credentials or routing. Audit/error output SHALL omit raw tokens, JQL values, issue/comment bodies, attachment contents and upstream error bodies. Service/project/resource error codes SHALL be consistent with the configuration and filtering specs.
 
 #### Scenario: Upstream error includes credentials or issue content
 - **WHEN** Jira returns a verbose error body

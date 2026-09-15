@@ -25,6 +25,9 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	for _, warning := range cfg.authFile.Warnings() {
+		log.Print(warning)
+	}
 	// All routes share the same Kibana budget, including internal analysis calls.
 	gate := queue.New("cklogs", cfg.maxConc, cfg.queueSize, cfg.queueWait)
 	log.Printf("Kibana queue: max_concurrency=%d queue_size=%d wait_timeout=%s", cfg.maxConc, cfg.queueSize, cfg.queueWait)

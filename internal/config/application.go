@@ -2,9 +2,9 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/url"
-	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -49,55 +49,9 @@ func defaults() File {
 	return File{Server: Server{ListenAddr: ":8091", AllowCIDRs: []string{}}, Audit: Audit{Enabled: true, Dir: "logs"}, CKLogs: CKLogs{BaseURL: "https://ck-logs.icoremail.net", Index: "mtatrans_distributed", TimeoutMS: 60000, Queue: Queue{MaxConcurrency: 2, Size: 32, WaitTimeoutMS: 30000}}}
 }
 
-// Reject null for typed settings, while retaining arbitrary JSON in createDefaults.
-func typedValuesPresent(b []byte) bool {
-	var tree any
-	if json.Unmarshal(b, &tree) != nil {
-		return false
-	}
-	return nonNull(tree, reflect.TypeOf(File{}))
-}
-func nonNull(v any, t reflect.Type) bool {
-	for t.Kind() == reflect.Pointer {
-		t = t.Elem()
-	}
-	if t.Kind() == reflect.Interface {
-		return true
-	}
-	if v == nil {
-		return false
-	}
-	switch t.Kind() {
-	case reflect.Struct:
-		m, ok := v.(map[string]any)
-		if !ok {
-			return false
-		}
-		for i := 0; i < t.NumField(); i++ {
-			f := t.Field(i)
-			key := strings.Split(f.Tag.Get("json"), ",")[0]
-			if x, ok := m[key]; ok && !nonNull(x, f.Type) {
-				return false
-			}
-		}
-	case reflect.Map:
-		for _, x := range v.(map[string]any) {
-			if !nonNull(x, t.Elem()) {
-				return false
-			}
-		}
-	case reflect.Slice:
-		for _, x := range v.([]any) {
-			if !nonNull(x, t.Elem()) {
-				return false
-			}
-		}
-	}
-	return true
-}
 func validURL(raw string, jira bool) bool {
 	u, err := url.Parse(raw)
-	if err != nil || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || strings.Contains(raw, "#") || (u.Scheme != "https" && (jira || u.Scheme != "http")) {
+	if err != nil || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || strings.Contains(raw, "#") || (u.Scheme != "https" && u.Scheme != "http") {
 		return false
 	}
 	if port := u.Port(); port != "" {
@@ -118,23 +72,43 @@ func validURL(raw string, jira bool) bool {
 	}
 	return true
 }
-func validAuth(a *UpstreamAuth, raw map[string]json.RawMessage, jira bool) bool {
+func validateAuth(a *UpstreamAuth, raw map[string]json.RawMessage, path string, jira bool) error {
 	if a == nil {
-		return true
+		return nil
 	}
-	if strings.ContainsAny(a.Token+a.Username+a.Password, "\r\n") {
-		return false
+	for _, field := range []struct{ name, value string }{{"token", a.Token}, {"username", a.Username}, {"password", a.Password}} {
+		if strings.ContainsAny(field.value, "\r\n") {
+			return invalid(path+"."+field.name, "must not contain CR or LF")
+		}
 	}
 	_, token := raw["token"]
 	_, user := raw["username"]
 	_, pass := raw["password"]
 	switch a.Type {
 	case "bearer":
-		return jira && a.Token != "" && !user && !pass
+		if !jira {
+			return invalid(path+".type", "must be basic for cklogs")
+		}
+		if user || pass {
+			return invalid(path, "bearer authentication must not include username or password")
+		}
+		if a.Token == "" {
+			return invalid(path+".token", "required for bearer authentication")
+		}
 	case "basic":
-		return !token && a.Username != "" && a.Password != ""
+		if token {
+			return invalid(path, "basic authentication must not include token")
+		}
+		if a.Username == "" {
+			return invalid(path+".username", "required for basic authentication")
+		}
+		if a.Password == "" {
+			return invalid(path+".password", "required for basic authentication")
+		}
+	default:
+		return invalid(path+".type", "must be basic or bearer (cklogs supports only basic)")
 	}
-	return false
+	return nil
 }
 func (f *File) validateApplication(b []byte) error {
 	var raw struct {
@@ -147,39 +121,80 @@ func (f *File) validateApplication(b []byte) error {
 		} `json:"cklogs"`
 	}
 	if json.Unmarshal(b, &raw) != nil {
-		return ErrConfig
+		return invalid("$", "invalid JSON structure")
 	}
 	if f.Jira != nil {
-		if (raw.Jira.BaseURL != nil && !validURL(f.Jira.BaseURL, true)) || !validAuth(f.Jira.Auth, raw.Jira.Auth, true) {
-			return ErrConfig
+		if raw.Jira.BaseURL != nil && !validURL(f.Jira.BaseURL, true) {
+			return invalid("jira.baseUrl", "must be an absolute HTTP or HTTPS URL with a valid host and port, without userinfo, query, fragment, encoded path or dot segments")
+		}
+		if err := validateAuth(f.Jira.Auth, raw.Jira.Auth, "jira.auth", true); err != nil {
+			return err
 		}
 		f.Jira.BaseURL = strings.TrimRight(f.Jira.BaseURL, "/")
 	}
-	if f.Enabled("jira") && (f.Jira == nil || f.Jira.BaseURL == "" || f.Jira.Auth == nil) {
-		return ErrConfig
+	if f.Enabled("jira") {
+		if f.Jira == nil || f.Jira.BaseURL == "" {
+			return invalid("jira.baseUrl", "required when a Jira token is configured")
+		}
+		if f.Jira.Auth == nil {
+			return invalid("jira.auth", "required when a Jira token is configured")
+		}
 	}
 	c := f.CKLogs
-	if !validURL(c.BaseURL, false) || c.Index == "" || !validAuth(c.Auth, raw.CKLogs.Auth, false) || (f.Enabled("cklogs") && c.Auth == nil) || c.TimeoutMS < 1 || c.TimeoutMS > MaxTimeoutMS || c.Queue.WaitTimeoutMS < 1 || c.Queue.WaitTimeoutMS > MaxWaitTimeoutMS || c.Queue.MaxConcurrency < 1 || c.Queue.Size < 0 {
-		return ErrConfig
+	if !validURL(c.BaseURL, false) {
+		return invalid("cklogs.baseUrl", "must be an absolute HTTP or HTTPS URL with a valid host and port, without userinfo, query or fragment")
+	}
+	if c.Index == "" {
+		return invalid("cklogs.index", "must not be empty")
+	}
+	if err := validateAuth(c.Auth, raw.CKLogs.Auth, "cklogs.auth", false); err != nil {
+		return err
+	}
+	if f.Enabled("cklogs") && c.Auth == nil {
+		return invalid("cklogs.auth", "required when a cklogs token is configured")
+	}
+	if c.TimeoutMS < 1 || c.TimeoutMS > MaxTimeoutMS {
+		return invalid("cklogs.timeoutMs", fmt.Sprintf("must be between 1 and %d milliseconds", MaxTimeoutMS))
+	}
+	if c.Queue.WaitTimeoutMS < 1 || c.Queue.WaitTimeoutMS > MaxWaitTimeoutMS {
+		return invalid("cklogs.queue.waitTimeoutMs", fmt.Sprintf("must be between 1 and %d milliseconds", MaxWaitTimeoutMS))
+	}
+	if c.Queue.MaxConcurrency < 1 {
+		return invalid("cklogs.queue.maxConcurrency", "must be at least 1")
+	}
+	if c.Queue.Size < 0 {
+		return invalid("cklogs.queue.size", "must be at least 0")
 	}
 	host, port, err := net.SplitHostPort(f.Server.ListenAddr)
 	if err != nil {
-		return ErrConfig
+		return invalid("server.listenAddr", "must be host:port or :port (bracket IPv6 addresses)")
 	}
 	n, err := strconv.Atoi(port)
-	if err != nil || n < 1 || n > 65535 || (host != "" && net.ParseIP(host) == nil && !validHostname(host)) {
-		return ErrConfig
+	if err != nil || n < 1 || n > 65535 {
+		return invalid("server.listenAddr", "port must be between 1 and 65535")
 	}
-	for _, cidr := range f.Server.AllowCIDRs {
+	if host != "" && net.ParseIP(host) == nil && !validHostname(host) {
+		return invalid("server.listenAddr", "host must be a valid IP address or hostname")
+	}
+	for i, cidr := range f.Server.AllowCIDRs {
 		if _, _, err := net.ParseCIDR(cidr); err != nil {
-			return ErrConfig
+			return invalid(fmt.Sprintf("server.allowCidrs[%d]", i), "must be a valid IPv4 or IPv6 CIDR")
 		}
 	}
 	if f.Audit.Enabled && f.Audit.Dir == "" {
-		return ErrConfig
+		return invalid("audit.dir", "must not be empty when audit.enabled is true")
 	}
 	return nil
 }
+
+// Warnings contain fixed text only, never URLs or credentials.
+func (f *File) Warnings() []string {
+	if f.Enabled("jira") && f.Jira != nil && strings.HasPrefix(f.Jira.BaseURL, "http://") {
+		return []string{"WARNING: jira.baseUrl uses HTTP; Jira credentials and request/response data are transmitted without TLS encryption; use HTTPS when available"}
+	}
+	return nil
+}
+
 func validHostname(host string) bool {
 	if len(host) > 253 {
 		return false

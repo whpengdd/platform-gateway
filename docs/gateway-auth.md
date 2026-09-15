@@ -140,7 +140,7 @@ readFields 默认 summary/status/updated/reporter/creator/assignee；description
 
 ## 4. 校验和生效
 
-- 文件不存在、不可读、JSON 非法、未知/重复键、tokens 为空或重复 token，启动失败；不打印文件正文、token 或解析片段。
+- 文件不存在、不可读、JSON 非法、未知/重复键、tokens 为空或重复 token，启动失败。错误包含配置文件路径、字段路径及原因，例如 `invalid gateway application configuration: jira.auth.password: required for basic authentication`；数组使用从 0 开始的索引，例如 `tokens[1].token`。JSON 结构错误还包含附近字节位置；未知字段仅报告父路径和位置，避免误贴在键名中的凭据泄漏。不打印字段值、文件正文、token 或解析片段。
 - token 不能为空或包含空白；示例占位符拒绝。缺少权限、同时声明两类权限、非法 cklogs 值或空 jiraProjects 均拒绝。
 - Jira project key 使用 `[A-Z][A-Z0-9_]{0,63}`；禁止通配符和重复项目，引用未配置的业务项目时启动失败。
 - 整个文件加载校验通过后才启用；修改 token、项目或 cklogs 档位后重启生效。第一版不做热更新和管理后台。
@@ -184,7 +184,7 @@ docker compose up -d --force-recreate --no-deps platform-gateway
 
 ## 6. 上游、默认值与部署迁移
 
-所有 Jira 项目共用 `jira.baseUrl`（HTTPS，允许 `/jira` 部署路径，不能包含 REST API 后缀）及一组上游凭据。客户端追加 `/rest/api/2/...`。Basic 方式须将整个 `jira.auth` 替换为：
+所有 Jira 项目共用 `jira.baseUrl`（HTTP 或 HTTPS，允许 `/jira` 部署路径，不能包含 REST API 后缀）及一组上游凭据。客户端追加 `/rest/api/2/...`。启用 Jira 且使用 HTTP 时，启动输出一次警告，说明凭据及请求/响应数据未通过 TLS 加密；不会因此拒绝启动。HTTPS 仍校验证书，建议在可用时使用。Basic 方式须将整个 `jira.auth` 替换为：
 
 ```json
 {"type": "basic", "username": "<jira-user>", "password": "<jira-password>"}

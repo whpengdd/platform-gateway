@@ -41,12 +41,12 @@ type Client struct {
 
 func NewClient(base, bearer, user, pass string) (*Client, error) {
 	u, err := url.Parse(base)
-	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.RawPath != "" || strings.ContainsAny(u.Path, "\\%") {
-		return nil, errors.New("invalid jira.baseUrl")
+	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.RawPath != "" || strings.ContainsAny(u.Path, "\\%") {
+		return nil, errors.New("invalid jira.baseUrl: expected an absolute HTTP or HTTPS URL without userinfo, query, fragment or unsafe path encoding")
 	}
 	for _, seg := range strings.Split(u.Path, "/") {
 		if seg == "." || seg == ".." {
-			return nil, errors.New("invalid jira.baseUrl")
+			return nil, errors.New("invalid jira.baseUrl: dot path segments are not allowed")
 		}
 	}
 	if (bearer != "") == (user != "" || pass != "") || bearer == "" && (user == "" || pass == "") || strings.ContainsAny(bearer+user+pass, "\r\n") {
