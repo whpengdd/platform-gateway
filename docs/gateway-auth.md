@@ -47,6 +47,7 @@ GATEWAY_CONFIG_FILE=/custom/path/config.json
   ],
   "jira": {
     "baseUrl": "https://jira.example.com/jira",
+    "accountCacheTtlSeconds": 300,
     "auth": {
       "type": "bearer",
       "token": "<jira-upstream-token>"
@@ -196,11 +197,24 @@ Bearer 与 Basic 字段不能混用；凭据必须非空且不能含 CR/LF。JSO
 |---|---|
 | server.listenAddr / allowCidrs | :8091 / []（不限制来源） |
 | audit.enabled / dir | true / logs |
+| jira.accountCacheTtlSeconds | 300秒；整数0–3600，0禁用已完成账号快照复用 |
 | cklogs.baseUrl / index | https://ck-logs.icoremail.net / mtatrans_distributed |
 | cklogs.timeoutMs | 60000 |
 | cklogs.queue.maxConcurrency / size / waitTimeoutMs | 2 / 32 / 30000 |
 
-只有缺失使用默认值。未知/重复键、typed null、错误类型、非法 CIDR、监听地址和超过 1 MiB 的文件拒绝。时间为正整数毫秒：timeoutMs 最大 9223372031854（HTTP 客户端额外加 5 秒），waitTimeoutMs 最大 9223372036854。队列 size 可为 0；并发必须 >= 1。createDefaults 保留既有数字保真限制，接受的数字以 json.Number 保存而不转为 float64。
+只有缺失使用默认值。未知/重复键、typed null、错误类型、非法 CIDR、监听地址和超过 1 MiB 的文件拒绝。CKLogs 超时为正整数毫秒：timeoutMs 最大 9223372031854（HTTP 客户端额外加 5 秒），waitTimeoutMs 最大 9223372036854。队列 size 可为 0；并发必须 >= 1。createDefaults 保留既有数字保真限制，接受的数字以 json.Number 保存而不转为 float64。
+
+`jira.accountCacheTtlSeconds` 使用整数秒，省略为300；显式0保留为0。null、字符串、小数、负数、超过3600及重复键均导致启动失败，诊断只输出允许的字段路径及固定原因，不回显输入值。配置改动通过已有重启 / 重建流程生效，无新环境变量或清缓存端点。未启用 Jira 时不会读取账号，也不增加 Jira 启动依赖。
+
+账号最小身份及 `/rest/api/2/myself` 的 timeZone 缓存按 Jira client / 凭据隔离，同一 client 的项目及入站 token 共享；每进程独立、不持久化。首次需要身份或时间转换时按需读取；TTL 从成功取得身份快照完成时起算，过期后按需刷新，没有后台轮询。并发刷新合并为一次读取，TTL=0 也合并在途请求，但不复用已完成快照；0仍保留游标比较所需的上下文历史。此缓存不包括 `/field`、创建元数据、权限或资源归属检查。
+
+账号过期刷新失败不使用旧身份或旧时区，5秒退避后由下一次请求尝试恢复。身份有效但时区缺失、未知或为 Local 时，创建及 capabilities 仍可使用身份；时间查询返回503 timezone_unavailable，并独立每5秒按需重试。该重试的上游读取失败时，时间消费者返回503 upstream_unavailable；尚未过期的身份仍可使用，失败不延长身份 TTL。新成功快照的身份或时区状态变化会使旧搜索游标返回410 cursor_expired；普通续期不改变上下文版本，评论游标仍按原合同处理。
+
+时区失败退避独立于成功快照 TTL；TTL=0 或不足5秒时，时间消费者也须等待5秒重试边界，且不能复用过期身份。只需要身份的创建与 capabilities 仍按自身 TTL 刷新。
+
+手动修改 Jira 对接账号时区后，应重启网关进程或按第5节重新创建容器，清空账号缓存和游标；否则需接受最长剩余 TTL 的变更检测延迟。即使 TTL=0，读取 `/myself` 与业务搜索仍非原子操作。时区规则嵌入网关二进制，最小容器无需另装系统 tzdata；系统 zoneinfo / ZONEINFO 仍可能优先，更新规则需更新 Go / 网关或系统数据，清缓存不能替代规则更新。
+
+回滚到本时区改进前的二进制前，先从配置删除 `jira.accountCacheTtlSeconds`（旧版本严格拒绝未知键），并恢复旧版要求的 Jira 服务账号 UTC 前提。按部署方运维流程调整真实账号；回滚 / 重启使旧游标失效。此改进只适配搜索边界，不修改 Jira 已存时间或页面显示，也不将所有创建 / 读取时间统一转换成 UTC。
 
 宿主配置将 `server.listenAddr` 改为 `127.0.0.1:8091`，`audit.dir` 可设为 `logs/platform-gateway`。相对审计路径相对进程工作目录，**不相对配置文件目录**；host launcher 的 cwd 是 app-root，配置路径默认 app-root/config.json。`--config-file` 相对 app-root 解析，或使用绝对路径。宿主健康探测使用文件内监听地址和端口。
 

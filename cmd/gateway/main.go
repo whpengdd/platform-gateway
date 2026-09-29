@@ -131,7 +131,7 @@ func loadConfig() (config, error) {
 	var jiraClient *jira.Client
 	if authFile.Enabled("jira") {
 		j := authFile.Jira
-		jiraClient, err = jira.NewClient(j.BaseURL, j.Auth.Token, j.Auth.Username, j.Auth.Password)
+		jiraClient, err = jira.NewClient(j.BaseURL, j.Auth.Token, j.Auth.Username, j.Auth.Password, jira.WithAccountCacheTTL(time.Duration(j.AccountCacheTtlSeconds)*time.Second))
 		if err != nil {
 			return config{}, err
 		}

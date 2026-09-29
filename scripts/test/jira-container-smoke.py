@@ -28,21 +28,36 @@ def run(*args, check=True):
 
 class Jira(http.server.BaseHTTPRequestHandler):
     calls = 0
+    account_calls = 0
+    queries = []
+    lock = threading.Lock()
     def log_message(self, *args):
         pass
-    def do_POST(self):
-        Jira.calls += 1
-        assert self.headers.get('Authorization') == 'Bearer mock-upstream'
-        body = json.loads(self.rfile.read(int(self.headers.get('Content-Length', '0'))))
-        assert self.path == '/jira/rest/api/2/search'
-        assert '(project = "CS")' in body['jql']
-        assert '(labels = zammad)' in body['jql']
-        data = json.dumps({'startAt':0, 'total':1, 'issues':[{'id':'1','key':'CS-1','fields':{'project':{'key':'CS'},'summary':'mock-only'}}]}).encode()
+    def send_json(self, value):
+        data = json.dumps(value).encode()
         self.send_response(200)
         self.send_header('Content-Type','application/json')
         self.send_header('Content-Length',str(len(data)))
         self.end_headers()
         self.wfile.write(data)
+    def do_GET(self):
+        with Jira.lock:
+            Jira.calls += 1
+            Jira.account_calls += 1
+        assert self.headers.get('Authorization') == 'Bearer mock-upstream'
+        assert self.path == '/jira/rest/api/2/myself'
+        self.send_json({'name':'mock-bot','displayName':'Mock Bot','timeZone':'Asia/Shanghai'})
+    def do_POST(self):
+        with Jira.lock:
+            Jira.calls += 1
+        assert self.headers.get('Authorization') == 'Bearer mock-upstream'
+        body = json.loads(self.rfile.read(int(self.headers.get('Content-Length', '0'))))
+        assert self.path == '/jira/rest/api/2/search'
+        assert '(project = "CS")' in body['jql']
+        assert '(labels = zammad)' in body['jql']
+        with Jira.lock:
+            Jira.queries.append(body['jql'])
+        self.send_json({'startAt':0, 'total':1, 'issues':[{'id':'1','key':'CS-1','fields':{'project':{'key':'CS'},'summary':'mock-only'}}]})
 
 def request(port, path, token='', body=None, expected=200):
     headers = {'Authorization':'Bearer '+token, 'Content-Type':'application/json'}
@@ -55,6 +70,22 @@ def request(port, path, token='', body=None, expected=200):
         status, data = e.code, e.read()
     assert status == expected, (path,status,expected,data)
     return data
+
+def verify_timezone_search(port, token):
+    before = Jira.account_calls
+    capability = json.loads(request(port,'/v1/jira/projects/CS/capabilities',token))
+    assert capability['bot']['identity'] == 'mock-bot'
+    assert 'timeZone' not in capability['bot']
+    first_query = len(Jira.queries)
+    for start, end in [
+        ('2026-09-29T10:00:45.123+08:00','2026-09-29T11:00:59+08:00'),
+        ('2026-09-29T02:00:45.123Z','2026-09-29T03:00:59Z'),
+    ]:
+        request(port,'/v1/jira/projects/CS/issues/search',token,{'updatedFrom':start,'updatedTo':end})
+    expected = '(project = "CS") AND (labels = zammad) AND (updated >= "2026-09-29 10:00" AND updated <= "2026-09-29 11:00") ORDER BY updated ASC, key ASC'
+    assert Jira.queries[first_query:] == [expected, expected], Jira.queries[first_query:]
+    request(port,'/v1/jira/projects/CS/capabilities',token)
+    assert Jira.account_calls == before + 1, 'capabilities and equivalent-offset searches must share one /myself snapshot'
 
 name = 'gateway-jira-smoke-' + uuid.uuid4().hex[:10]
 # Colima shares the user's home; no real configuration is read or overwritten.
@@ -97,6 +128,7 @@ with tempfile.TemporaryDirectory(prefix='gateway-jira-smoke-',dir=os.path.expand
             '--mount','type=bind,src='+str(config)+',dst=/config.json,readonly',
             '--mount','type=bind,src='+str(cert)+',dst=/mock-ca.pem,readonly',
             '-e','SSL_CERT_FILE=/mock-ca.pem','-e','GATEWAY_CONFIG_FILE=/config.json',
+            '-e','TZ=UTC','-e','ZONEINFO=/missing-zoneinfo','-e','GOROOT=/missing-goroot',
             '-e','HTTP_PROXY=http://gateway-mock.test:'+str(proxy_server.server_port),
             '-e','HTTPS_PROXY=http://gateway-mock.test:'+str(proxy_server.server_port),
             '-e','NO_PROXY='+('gateway-mock.test' if bypass else ''),
@@ -114,7 +146,10 @@ with tempfile.TemporaryDirectory(prefix='gateway-jira-smoke-',dir=os.path.expand
         # Missing bind source must fail, not turn into a directory.
         missing = run('run','--rm','--mount','type=bind,src='+str(root/'absent.json')+',dst=/config.json,readonly',image,check=False)
         assert missing.returncode != 0 and not (root/'absent.json').exists()
-        run('run','--rm','--entrypoint','/bin/sh',image,'-c','test ! -e /config.json && test ! -e /src/config.json && test "$(id -u)" = 65532')
+        run('run','--rm','--entrypoint','/bin/sh',image,'-c',
+            'test ! -e /config.json && test ! -e /src/config.json && test "$(id -u)" = 65532 && '
+            'test ! -d /usr/share/zoneinfo && test ! -d /usr/lib/zoneinfo && '
+            'test ! -d /usr/share/lib/zoneinfo && test ! -d /etc/zoneinfo')
         write_config('mock-jira-old')
         port=start()
         inspect=json.loads(run('inspect',name).stdout)[0]
@@ -126,6 +161,8 @@ with tempfile.TemporaryDirectory(prefix='gateway-jira-smoke-',dir=os.path.expand
         assert run('exec',name,'id','-u').stdout.strip()=='65532'
         request(port,'/v1/jira/projects','mock-jira-old')
         request(port,'/v1/jira/projects/CS/issues/search','mock-jira-old',{})
+        assert Jira.account_calls == 0, 'unbounded search must not fetch account context'
+        verify_timezone_search(port,'mock-jira-old')
         request(port,'/v1/cklogs/delivery','mock-ck',{'account':'a@example.com','direction':'outbound','peer':'b@example.com','timeRange':{'from':'2026-09-01T00:00:00Z','to':'2026-09-01T01:00:00Z'}})
         assert CK.proxied > 0 and CK.direct == 0
         request(port,'/v1/jira/projects','stale-token',expected=401)
@@ -147,7 +184,8 @@ with tempfile.TemporaryDirectory(prefix='gateway-jira-smoke-',dir=os.path.expand
         assert CK.direct > 0 and CK.proxied == proxied
         request(port,'/v1/jira/projects','mock-jira-old',expected=401)
         request(port,'/v1/jira/projects/CS/issues/search','mock-jira-new',{})
-        print('PASS: TLS mock, UID 65532, read-only mount, missing source, cross-service/project denial, atomic replacement + recreation, token rotation, no config in runtime image, CKLogs proxy + NO_PROXY, Jira direct')
+        verify_timezone_search(port,'mock-jira-new')
+        print('PASS: TLS mock, UID 65532, read-only mount, missing source, cross-service/project denial, atomic replacement + recreation, token rotation, no config in runtime image, CKLogs proxy + NO_PROXY, Jira direct, account cache, equivalent-offset Shanghai search without system zoneinfo')
     finally:
         run('rm','-f',name,check=False)
         for mock in [ck_server,proxy_server]: mock.shutdown(); mock.server_close()
