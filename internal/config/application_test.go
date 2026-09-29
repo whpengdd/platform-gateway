@@ -69,3 +69,55 @@ func TestRuntimeIntegerQueueBoundary(t *testing.T) {
 		t.Fatal("representable runtime integer rejected", err)
 	}
 }
+
+const jiraCacheFixture = `{"tokens":[{"token":"incoming-secret","jiraProjects":["CS"]}],"jira":{"baseUrl":"https://jira.test","auth":{"type":"bearer","token":"upstream-secret"},"projects":{"CS":{}}%s}}`
+
+func TestJiraAccountCacheTTLValues(t *testing.T) {
+	for _, value := range []string{"0", "1", "300", "3600"} {
+		t.Run(value, func(t *testing.T) {
+			if _, err := Parse([]byte(fmt.Sprintf(jiraCacheFixture, `,"accountCacheTtlSeconds":`+value))); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestJiraAccountCacheTTLDefaultAndExplicitZero(t *testing.T) {
+	for _, tt := range []struct {
+		name, extra string
+		want        int64
+	}{{"omitted", "", 300}, {"disabled", `,"accountCacheTtlSeconds":0`, 0}, {"maximum", `,"accountCacheTtlSeconds":3600`, 3600}} {
+		t.Run(tt.name, func(t *testing.T) {
+			f, err := Parse([]byte(fmt.Sprintf(jiraCacheFixture, tt.extra)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := f.Jira.AccountCacheTtlSeconds; got != tt.want {
+				t.Fatalf("account cache TTL = %d, want %d", got, tt.want)
+			}
+		})
+	}
+	f, err := Parse([]byte(fmt.Sprintf(appFixture, "", "")))
+	if err != nil || f.Jira != nil {
+		t.Fatalf("cklogs-only configuration acquired a Jira requirement: %v, %v", f, err)
+	}
+}
+
+func TestJiraAccountCacheTTLInvalidValues(t *testing.T) {
+	for _, value := range []string{"null", `"private-value"`, "1.5", "1.0", "1e2", "-1", "3601", "9223372036854775808", "true", "{}", "[]", `300,"accountCacheTtlSeconds":0`} {
+		t.Run(value, func(t *testing.T) {
+			_, err := Parse([]byte(fmt.Sprintf(jiraCacheFixture, `,"accountCacheTtlSeconds":`+value)))
+			if err == nil {
+				t.Fatal("invalid cache TTL accepted")
+			}
+			if !strings.Contains(err.Error(), "jira.accountCacheTtlSeconds:") {
+				t.Fatalf("missing field path: %v", err)
+			}
+			for _, secret := range []string{"incoming-secret", "upstream-secret", "private-value", "jira.test", "9223372036854775808"} {
+				if strings.Contains(err.Error(), secret) {
+					t.Fatalf("configuration value leaked: %v", err)
+				}
+			}
+		})
+	}
+}

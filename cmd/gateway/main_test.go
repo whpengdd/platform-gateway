@@ -2,11 +2,15 @@ package main
 
 import (
 	"fmt"
+	"io"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"platform-gateway/internal/auth"
 	fileconfig "platform-gateway/internal/config"
+	"platform-gateway/internal/jira"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -81,5 +85,57 @@ func TestEnabledServicesAndStaleEnvironment(t *testing.T) {
 		if _, err := loadTestConfig(t, raw); err == nil {
 			t.Fatal("missing upstream accepted")
 		}
+	}
+}
+
+func TestLoadConfigJiraAccountCacheTTL(t *testing.T) {
+	for _, tt := range []struct {
+		name, setting string
+		wantReads     int32
+	}{{"default", "", 1}, {"zero", `,"accountCacheTtlSeconds":0`, 2}, {"maximum", `,"accountCacheTtlSeconds":3600`, 1}} {
+		t.Run(tt.name, func(t *testing.T) {
+			var profileReads atomic.Int32
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/rest/api/2/search":
+					io.WriteString(w, `{"issues":[],"total":0,"startAt":0}`)
+				case "/rest/api/2/myself":
+					profileReads.Add(1)
+					io.WriteString(w, `{"name":"bot","timeZone":"Asia/Shanghai"}`)
+				default:
+					t.Errorf("unexpected Jira request: %s", r.URL.Path)
+					http.NotFound(w, r)
+				}
+			}))
+			defer upstream.Close()
+			raw := fmt.Sprintf(`{"tokens":[{"token":"jira-test","jiraProjects":["CS"]}],"jira":{"baseUrl":%q,"auth":{"type":"bearer","token":"upstream"},"projects":{"CS":{}}%s}}`, upstream.URL, tt.setting)
+			cfg, err := loadTestConfig(t, raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if profileReads.Load() != 0 {
+				t.Fatal("loading configuration unexpectedly reads Jira account")
+			}
+			s, err := jira.NewServer(cfg.jiraClient, auth.NewFromFile(cfg.authFile, nil), cfg.authFile.Jira.Projects)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for range 2 {
+				r := httptest.NewRequest("GET", "/v1/jira/projects/CS/capabilities", nil)
+				r.Header.Set("Authorization", "Bearer jira-test")
+				w := httptest.NewRecorder()
+				s.ServeHTTP(w, r)
+				if w.Code != 200 {
+					t.Fatalf("capabilities status %d: %s", w.Code, w.Body.String())
+				}
+			}
+			if got := profileReads.Load(); got != tt.wantReads {
+				t.Fatalf("Jira account reads = %d, want %d", got, tt.wantReads)
+			}
+		})
+	}
+	cfg, err := loadTestConfig(t, `{`+ckFixture+`}}`)
+	if err != nil || cfg.jiraClient != nil {
+		t.Fatalf("cklogs-only configuration acquired a Jira client: %v", err)
 	}
 }

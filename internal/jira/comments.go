@@ -112,7 +112,7 @@ func (s *Server) comments(r *http.Request, key string, p *project, i Issue, chil
 	}
 	var next any
 	if len(out.Comments) > 0 && start+len(out.Comments) < out.Total {
-		next = s.nextCursor("comments", key, i.ID, Search{Limit: limit}, start+len(out.Comments), expiry)
+		next = s.nextCursor("comments", key, i.ID, Search{Limit: limit}, start+len(out.Comments), expiry, 0)
 	}
 	return map[string]any{"items": items, "nextCursor": next}, nil
 }

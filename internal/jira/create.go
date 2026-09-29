@@ -16,11 +16,11 @@ type creation struct {
 
 func (s *Server) creation(ctx context.Context, key string, p *project) creation {
 	out := creation{reason: "metadata_unavailable"}
-	var bot map[string]any
-	if s.client.JSON(ctx, "GET", "myself", nil, nil, &bot, false) != nil || person(bot) == nil {
+	account, err := s.client.accountContext(ctx, false)
+	if err != nil {
 		return out
 	}
-	out.bot = bot
+	out.bot = account.Bot
 	if p.IssueTypeID == "" || len(p.CreateFields) == 0 {
 		out.reason = "creation_not_configured"
 		return out

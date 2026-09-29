@@ -1,8 +1,25 @@
 # Jira 网关验证记录
 
-变更：add-project-scoped-jira-gateway（spec-driven）。本记录只覆盖本仓实现、本地 mock 和容器，不代表生产验收。
+本记录只覆盖本仓实现、本地 mock 和容器，不代表生产验收。历史基线变更为 add-project-scoped-jira-gateway（spec-driven）。
 
-## 已执行
+## 2026-09-29：账号时区与缓存改进
+
+变更 `fix-jira-timezone-handling` 已同步主规格并于2026-09-29归档，实施及逐项证据见 [验证报告](../openspec/changes/archive/2026-09-29-fix-jira-timezone-handling/verification.md)。已通过：
+
+- `go test -count=1 ./...`、`go test -race -count=1 ./internal/jira ./internal/httpapi ./internal/config`、`go vet ./...`。
+- 独立进程 `TZ=Pacific/Honolulu` 下的搜索时区与 DST 回归；缺失/Local 时区时 HTTP 创建仍返回201。
+- `docker --context colima build -t platform-gateway:jira-timezone-smoke .`，以及该镜像的 TLS container smoke 和 self/install/149 × bearer/basic 六组 Compose smoke。
+- 容器没有系统 zoneinfo，ZONEINFO/GOROOT 指向不存在位置、TZ=UTC；仍正确生成上海当地时间的 JQL，+08:00 与 Z 的等价输入一致，capabilities 与时间搜索共享一次 /myself。
+- 配置默认300秒/显式0、缓存合并/取消/失败退避/身份与时区隔离、游标 generation、历史秒级回拨、创建/读取原字符串保留及原有授权回归。
+- OpenSpec 严格校验、脚本语法及 diff 空白检查。
+
+后续显式复核发现的 W1 已修复：缺失时区的5秒退避不再依赖成功快照 TTL，TTL=0/1/4/5/300秒的组件与 HTTP 回归通过；过期身份不返回，身份消费者仍可按自身 TTL 刷新。修复后重新运行全量 Go 测试、相关包竞态检查、vet 和 OpenSpec 严格校验，均通过；本次未重复容器或真实 Jira 验收。
+
+MR 提交前对包含 W1 的最终代码再次完成全量 Go / race / vet / 主规格校验，并重新构建镜像、补跑 TLS container smoke 和六组 Compose smoke，全部通过；真实 Jira 验收仍未执行。
+
+Compose 的缺失挂载测试保留部署脚本对已删除配置的拒绝，Docker 层改用从未创建过的路径，避免共享文件系统对最近删除挂载项的时序影响；未放宽部署校验。所有上游均为临时本地 mock，未读取真实凭据或访问生产 Jira。
+
+## 历史基线已执行
 
 - 本机 Go 1.27.1：`go test ./...`、`go vet ./...`、相关包的 `go test -race`。
 - 本机二进制：`go build -buildvcs=false -o bin/platform-gateway ./cmd/gateway`。工作区父目录存在另一种 VCS，关闭自动 VCS stamping 后构建成功；部署脚本也采用该参数。
@@ -25,7 +42,7 @@ JQL 强制项目 AND 完整过滤片段，客户端值独立编码；拒绝括�
 
 ## 实施时仍需核验
 
-目标 Jira 版本及 REST 行为、认证方式、项目/type、实际创建必填字段和选项、客户字段 schema、bot reporter 可设置权限、附件权限及路径形状。必须把 Jira 服务账号时区设为 UTC：当前时间条件使用 Jira 分钟精度字面量，调用方处理分钟边界重叠。未执行任何真实 Jira 查询或写入。
+目标 Jira 版本及 REST 行为、认证方式、项目/type、实际创建必填字段和选项、客户字段 schema、bot reporter 可设置权限、附件权限及路径形状。当前版本自动读取 Jira 服务账号的 timeZone，不再要求统一 UTC；仍需核对继承默认时区时 /myself 的实际返回及规则版本。时间条件保留分钟精度，调用方处理边界重叠；回拨重复分钟边界明确拒绝，缓存内账号变化存在检测延迟。原始“创建时间少八小时”尚无现场样本，不能视为已定位或修复。未执行任何真实 Jira 查询或写入。
 
 JQL 存在索引延迟和检查/写入竞态；不提供即时撤权、事务授权、幂等账本或持久额度。分页不是快照。实际 CS 字段清单并未因 mock 通过而完成验收。
 

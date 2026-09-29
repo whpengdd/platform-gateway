@@ -17,9 +17,10 @@ type UpstreamAuth struct {
 	Password string `json:"password,omitempty"`
 }
 type Jira struct {
-	BaseURL  string             `json:"baseUrl"`
-	Auth     *UpstreamAuth      `json:"auth"`
-	Projects map[string]Project `json:"projects"`
+	BaseURL                string             `json:"baseUrl"`
+	Auth                   *UpstreamAuth      `json:"auth"`
+	Projects               map[string]Project `json:"projects"`
+	AccountCacheTtlSeconds int64              `json:"accountCacheTtlSeconds"`
 }
 type CKLogs struct {
 	BaseURL   string        `json:"baseUrl"`
@@ -113,8 +114,9 @@ func validateAuth(a *UpstreamAuth, raw map[string]json.RawMessage, path string, 
 func (f *File) validateApplication(b []byte) error {
 	var raw struct {
 		Jira struct {
-			BaseURL *string                    `json:"baseUrl"`
-			Auth    map[string]json.RawMessage `json:"auth"`
+			BaseURL                *string                    `json:"baseUrl"`
+			Auth                   map[string]json.RawMessage `json:"auth"`
+			AccountCacheTtlSeconds *int64                     `json:"accountCacheTtlSeconds"`
 		} `json:"jira"`
 		CKLogs struct {
 			Auth map[string]json.RawMessage `json:"auth"`
@@ -124,6 +126,12 @@ func (f *File) validateApplication(b []byte) error {
 		return invalid("$", "invalid JSON structure")
 	}
 	if f.Jira != nil {
+		if raw.Jira.AccountCacheTtlSeconds == nil {
+			f.Jira.AccountCacheTtlSeconds = 300
+		}
+		if f.Jira.AccountCacheTtlSeconds < 0 || f.Jira.AccountCacheTtlSeconds > 3600 {
+			return invalid("jira.accountCacheTtlSeconds", "must be between 0 and 3600 seconds")
+		}
 		if raw.Jira.BaseURL != nil && !validURL(f.Jira.BaseURL, true) {
 			return invalid("jira.baseUrl", "must be an absolute HTTP or HTTPS URL with a valid host and port, without userinfo, query, fragment, encoded path or dot segments")
 		}

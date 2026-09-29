@@ -37,9 +37,10 @@ type Client struct {
 	base               *url.URL
 	http               *http.Client
 	bearer, user, pass string
+	accounts           accountCache
 }
 
-func NewClient(base, bearer, user, pass string) (*Client, error) {
+func NewClient(base, bearer, user, pass string, options ...ClientOption) (*Client, error) {
 	u, err := url.Parse(base)
 	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.RawPath != "" || strings.ContainsAny(u.Path, "\\%") {
 		return nil, errors.New("invalid jira.baseUrl: expected an absolute HTTP or HTTPS URL without userinfo, query, fragment or unsafe path encoding")
@@ -53,7 +54,13 @@ func NewClient(base, bearer, user, pass string) (*Client, error) {
 		return nil, errors.New("configure exactly one Jira authentication method")
 	}
 	u.Path = strings.TrimRight(u.Path, "/")
-	return &Client{base: u, bearer: bearer, user: user, pass: pass, http: &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }, Transport: &http.Transport{Proxy: nil, DialContext: (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext, TLSHandshakeTimeout: 10 * time.Second, ResponseHeaderTimeout: 30 * time.Second, IdleConnTimeout: 90 * time.Second, MaxIdleConns: 8}}}, nil
+	c := &Client{base: u, bearer: bearer, user: user, pass: pass, accounts: accountCache{ttl: 5 * time.Minute, now: time.Now}, http: &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }, Transport: &http.Transport{Proxy: nil, DialContext: (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext, TLSHandshakeTimeout: 10 * time.Second, ResponseHeaderTimeout: 30 * time.Second, IdleConnTimeout: 90 * time.Second, MaxIdleConns: 8}}}
+	for _, option := range options {
+		if err := option(c); err != nil {
+			return nil, err
+		}
+	}
+	return c, nil
 }
 func (c *Client) endpoint(path string, query url.Values) string {
 	u := *c.base

@@ -54,7 +54,7 @@ func baseline(w http.ResponseWriter, r *http.Request) {
 	case "/jira/rest/api/2/field":
 		io.WriteString(w, `[{"id":"customfield_1","schema":{"type":"string"}}]`)
 	case "/jira/rest/api/2/myself":
-		io.WriteString(w, `{"name":"bot","displayName":"Bot","self":"SECRET_URL"}`)
+		io.WriteString(w, `{"name":"bot","displayName":"Bot","timeZone":"UTC","self":"SECRET_URL"}`)
 	case "/jira/rest/api/2/issue/createmeta":
 		json.NewEncoder(w).Encode(mockMetadata())
 	case "/jira/rest/api/2/issue":
@@ -184,7 +184,7 @@ func TestInvalidFilterStaysDisabled(t *testing.T) {
 }
 func TestCursors(t *testing.T) {
 	s, _ := fixture(t, baseline)
-	raw := s.nextCursor("comments", "CS", "1", Search{Limit: 50}, 50, 0)
+	raw := s.nextCursor("comments", "CS", "1", Search{Limit: 50}, 50, 0, 0)
 	for _, tt := range []struct{ raw, op, key, parent string }{{raw, "search", "CS", ""}, {raw, "comments", "IT", "1"}, {raw, "comments", "CS", "2"}, {raw + "x", "comments", "CS", "1"}} {
 		if _, err := s.decodeCursor(tt.raw, tt.op, tt.key, tt.parent); err == nil {
 			t.Fatal("cursor accepted")
@@ -202,7 +202,7 @@ func TestCursors(t *testing.T) {
 		t.Fatal(err)
 	}
 	s, _ = fixture(t, baseline)
-	raw = s.nextCursor("search", "CS", "", Search{Limit: 50}, 50, s.now().Add(-time.Second).Unix())
+	raw = s.nextCursor("search", "CS", "", Search{Limit: 50}, 50, s.now().Add(-time.Second).Unix(), 0)
 	if _, err := s.decodeCursor(raw, "search", "CS", ""); err.(*Error).Code != "cursor_expired" {
 		t.Fatal(err)
 	}
@@ -320,7 +320,7 @@ func TestLongCursorAndExplicitNulls(t *testing.T) {
 	for i := 0; i < 100; i++ {
 		keys = append(keys, strings.Repeat("A", 64)+"-"+strings.Repeat("1", 64))
 	}
-	raw := s.nextCursor("search", "CS", "", Search{Keys: keys, Limit: 50}, 50, 0)
+	raw := s.nextCursor("search", "CS", "", Search{Keys: keys, Limit: 50}, 50, 0, 0)
 	if len(raw) > 32768 {
 		t.Fatal("oversized own cursor")
 	}
@@ -380,7 +380,7 @@ func TestCommentCursorCrossParentAndOperation(t *testing.T) {
 		}
 		baseline(w, r)
 	})
-	raw := s.nextCursor("comments", "CS", "1", Search{Limit: 50}, 50, 0)
+	raw := s.nextCursor("comments", "CS", "1", Search{Limit: 50}, 50, 0, 0)
 	w := call(s, "GET", root+"/issues/CS-2/comments?cursor="+raw, "jira-a", "")
 	if w.Code != 400 || childCalls.Load() != 0 {
 		t.Fatal(w.Code, w.Body.String())

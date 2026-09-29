@@ -10,13 +10,14 @@ import (
 )
 
 type cursor struct {
-	Operation string `json:"o"`
-	Project   string `json:"p"`
-	Parent    string `json:"i,omitempty"`
-	Query     Search `json:"q"`
-	Start     int    `json:"s"`
-	Config    string `json:"c"`
-	Expires   int64  `json:"e"`
+	Operation         string `json:"o"`
+	Project           string `json:"p"`
+	Parent            string `json:"i,omitempty"`
+	Query             Search `json:"q"`
+	Start             int    `json:"s"`
+	Config            string `json:"c"`
+	Expires           int64  `json:"e"`
+	AccountGeneration uint64 `json:"g,omitempty"`
 }
 
 func (s *Server) encodeCursor(c cursor) string {
@@ -52,9 +53,9 @@ func (s *Server) decodeCursor(raw, op, key, parent string) (cursor, error) {
 	}
 	return c, nil
 }
-func (s *Server) nextCursor(op, key, parent string, q Search, start int, expires int64) string {
+func (s *Server) nextCursor(op, key, parent string, q Search, start int, expires int64, generation uint64) string {
 	if expires == 0 {
 		expires = s.now().Add(15 * time.Minute).Unix()
 	}
-	return s.encodeCursor(cursor{Operation: op, Project: key, Parent: parent, Query: q, Start: start, Config: s.digest, Expires: expires})
+	return s.encodeCursor(cursor{Operation: op, Project: key, Parent: parent, Query: q, Start: start, Config: s.digest, Expires: expires, AccountGeneration: generation})
 }
