@@ -22,17 +22,21 @@ type Filters struct {
 
 type QueryOptions struct {
 	Dataset   string
+	Stage     string
 	CountOnly bool
 	PageSize  int
 	Offset    int
 }
 
 type QueryResult struct {
-	OK        bool
-	Entries   []Entry
-	Total     int
-	ErrorKind string
-	Message   string
+	TotalExact    bool
+	TotalRelation string
+	HitIDs        []string
+	OK            bool
+	Entries       []Entry
+	Total         int
+	ErrorKind     string
+	Message       string
 }
 
 type TraceResult struct {

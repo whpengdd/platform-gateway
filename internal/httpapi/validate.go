@@ -166,7 +166,7 @@ func parseTimeRange(tr *timeRangeJSON, now time.Time) (cklogs.TimeRange, error) 
 		return cklogs.TimeRange{}, &apiError{http.StatusBadRequest, "time_range_too_old", "查询时间不能早于最近 30 天"}
 	}
 	if end.Sub(start) > maxWindow {
-		return cklogs.TimeRange{}, &apiError{http.StatusBadRequest, "time_range_too_large", "单次查询窗口不能超过 7 天（168 小时）"}
+		return cklogs.TimeRange{}, &apiError{http.StatusBadRequest, "time_range_too_large", "单次查询窗口不能超过 7 天（168 小时）；请缩小起止时间，建议先查邮件发生时间前后 1 小时，或分段查询"}
 	}
 	return cklogs.TimeRange{FromMs: start.UnixMilli(), ToMs: end.UnixMilli()}, nil
 }

@@ -22,8 +22,10 @@ func (s *Service) OpTimeout() time.Duration {
 	return op
 }
 
+const narrowQueryAdvice = "建议先将起止时间缩小到邮件发生时间前后 1 小时；仍未完成时分段查询，并补充对端完整邮箱或邮件主题。"
+
 func timeoutMessage() string {
-	return "日志查询超过60秒，请缩小查询范围或增加查询条件后重试"
+	return "日志查询超时，查询尚未完成，不能据此判断没有记录。" + narrowQueryAdvice
 }
 
 func notConfiguredDelivery() DeliveryResult {

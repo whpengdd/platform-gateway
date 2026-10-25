@@ -42,6 +42,11 @@ type Record struct {
 }
 
 type KibanaCall struct {
+	Stage      string `json:"stage,omitempty"`
+	BudgetMS   int64  `json:"budget_ms"`
+	QueryShape string `json:"query_shape,omitempty"`
+	QueryHash  string `json:"query_hash,omitempty"`
+	TotalExact bool   `json:"total_exact"`
 	Index      string `json:"index,omitempty"`
 	Dataset    string `json:"dataset,omitempty"`
 	CountOnly  bool   `json:"count_only,omitempty"`

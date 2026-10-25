@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -53,6 +54,9 @@ func TestParseTimeRangePolicy(t *testing.T) {
 			var apiErr *apiError
 			if !errors.As(err, &apiErr) || apiErr.Code != tc.code {
 				t.Fatalf("err=%v", err)
+			}
+			if tc.code == "time_range_too_large" && (!strings.Contains(apiErr.Msg, "缩小") || !strings.Contains(apiErr.Msg, "1 小时")) {
+				t.Fatalf("missing narrowing guidance: %+v", apiErr)
 			}
 		})
 	}

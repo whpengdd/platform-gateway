@@ -32,7 +32,7 @@ func (s *Service) QuerySelfServiceDelivery(ctx context.Context, in DeliveryQuery
 			Sender:    derived.Sender,
 			Recipient: derived.Recipient,
 			TimeRange: in.TimeRange,
-		}, QueryOptions{Dataset: "delivery_agent", CountOnly: true})
+		}, QueryOptions{Dataset: "delivery_agent", CountOnly: true, Stage: "da_count"})
 		if !da.OK {
 			msg := "DATRANS 查询失败：" + da.Message
 			if da.ErrorKind == "timeout" {
@@ -46,7 +46,7 @@ func (s *Service) QuerySelfServiceDelivery(ctx context.Context, in DeliveryQuery
 				Sender:    derived.Sender,
 				Recipient: derived.Recipient,
 				TimeRange: in.TimeRange,
-			}, QueryOptions{CountOnly: true})
+			}, QueryOptions{CountOnly: true, Stage: "mta_count"})
 			if !mta.OK {
 				return mtaFailure(mta)
 			}
@@ -57,7 +57,7 @@ func (s *Service) QuerySelfServiceDelivery(ctx context.Context, in DeliveryQuery
 				Sender:    derived.Sender,
 				Recipient: derived.Recipient,
 				TimeRange: in.TimeRange,
-			}, QueryOptions{Dataset: "delivery_proxy", CountOnly: true})
+			}, QueryOptions{Dataset: "delivery_proxy", CountOnly: true, Stage: "proxy_count"})
 			if !proxy.OK {
 				return proxyFailure(proxy)
 			}
@@ -76,11 +76,9 @@ func (s *Service) QuerySelfServiceDelivery(ctx context.Context, in DeliveryQuery
 		}
 	}
 
-	da := s.Client.Query(ctx, Filters{
-		Sender:    derived.Sender,
-		Recipient: derived.Recipient,
-		TimeRange: in.TimeRange,
-	}, QueryOptions{Dataset: "delivery_agent", PageSize: HardSize})
+	da, incomplete := s.queryDeliveryAgentPages(ctx, Filters{
+		Sender: derived.Sender, Recipient: derived.Recipient, TimeRange: in.TimeRange,
+	})
 	if !da.OK {
 		msg := "DATRANS 查询失败：" + da.Message
 		if da.ErrorKind == "timeout" {
@@ -88,19 +86,13 @@ func (s *Service) QuerySelfServiceDelivery(ctx context.Context, in DeliveryQuery
 		}
 		return deliveryError(ckLogsCode(da.ErrorKind), msg, nil)
 	}
-	if da.Total > len(da.Entries) {
+	if incomplete != "" {
 		return DeliveryResult{
-			Status:      "error",
-			Provider:    "log_platform",
-			Code:        "CK_LOGS_DA_TRUNCATED",
-			Total:       ptrInt(da.Total),
-			Entries:     []Entry{},
-			Limitations: []string{"DATRANS 明细最多返回 " + itoa(HardSize) + " 条，本次结果已截断；不返回不完整结果。请缩小时间范围或增加收件人、主题等条件后重试。"},
-			Truncated:   ptrBool(true),
-			CountOnly:   ptrBool(false),
-			Page:        page,
-			PageSize:    pageSize,
-			HasMore:     ptrBool(false),
+			Status: "error", Provider: "log_platform", Code: "CK_LOGS_DA_TRUNCATED",
+			Total: ptrInt(da.Total), Entries: []Entry{},
+			Limitations: []string{incomplete + "；不返回不完整结果。" + narrowQueryAdvice},
+			Truncated:   ptrBool(true), CountOnly: ptrBool(false), Page: page,
+			PageSize: pageSize, HasMore: ptrBool(false),
 		}
 	}
 
@@ -206,6 +198,9 @@ func (s *Service) QuerySelfServiceDelivery(ctx context.Context, in DeliveryQuery
 	// 串行 tid 回查没有上限会把并发槽占到 N*超时；截断或超时后未回查的行保持 unknown，并写 limitation。
 	const maxUnknownTidLookups = 8
 	lim := []string{}
+	if da.Total > HardSize {
+		lim = append(lim, "DATRANS 已按固定时间窗分页取回；上游未提供快照，查询期间的迟到或变更日志可能影响跨页一致性。")
+	}
 	if len(unknownTids) > maxUnknownTidLookups {
 		unknownTids = unknownTids[:maxUnknownTidLookups]
 		lim = append(lim, "未知状态记录的 MTA 回查已达上限（"+itoa(maxUnknownTidLookups)+" 条），其余保持 unknown，不能据此断定投递结果。")

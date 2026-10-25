@@ -2,7 +2,6 @@ package cklogs
 
 import (
 	"context"
-	"strings"
 )
 
 func (s *Service) QueryAnalysisDelivery(ctx context.Context, in DeliveryQuery) DeliveryResult {
@@ -27,7 +26,7 @@ func (s *Service) QueryAnalysisDelivery(ctx context.Context, in DeliveryQuery) D
 				Limitations: []string{"显式入参与邮件上下文均无法提取查询条件（sender/recipient/domain/subject/msgId 全空），未执行查询。"},
 			}
 		}
-		res := s.Client.Query(ctx, filters, QueryOptions{CountOnly: true})
+		res := s.Client.Query(ctx, filters, QueryOptions{CountOnly: true, Stage: "mta_exact_count"})
 		if !res.OK {
 			return mtaFailure(res)
 		}
@@ -57,9 +56,12 @@ func (s *Service) queryMTA(ctx context.Context, filters Filters, derived derived
 		}
 	}
 	sameSenderRecipient := derived.Sender != "" && derived.Recipient != "" && derived.Sender == derived.Recipient
-	countRes := s.Client.Query(ctx, filters, QueryOptions{CountOnly: true})
+	countRes := s.Client.Query(ctx, filters, QueryOptions{CountOnly: true, Stage: "mta_exact_count"})
 	if !countRes.OK {
 		return mtaFailure(countRes)
+	}
+	if requireComplete && !countRes.TotalExact {
+		return deliveryError("CK_LOGS_MTA_TRUNCATED", "MTA 总数不精确，无法确认完整性；"+narrowQueryAdvice, nil)
 	}
 	if requireComplete && countRes.Total > HardSize {
 		msg := "MTA 原始日志命中 " + itoa(countRes.Total) + " 条，超过平台最多返回 " + itoa(HardSize) + " 条的上限，无法完成全量聚合与准确分页；本次不返回不完整结果。请缩小时间范围或增加收件人、主题等条件后重试。"
@@ -78,63 +80,10 @@ func (s *Service) queryMTA(ctx context.Context, filters Filters, derived derived
 	if countRes.Total == 0 {
 		canRetryRecipient := !sameSenderRecipient && derived.Recipient != "" && (derived.Sender != "" || derived.Subject != "" || derived.MsgID != "")
 		if canRetryRecipient {
-			fallbackFilters := filters
-			fallbackFilters.Recipient = ""
-			fallbackCount := s.Client.Query(ctx, fallbackFilters, QueryOptions{CountOnly: true})
-			if !fallbackCount.OK {
-				return mtaFailure(fallbackCount)
-			}
-			if fallbackCount.Total > 0 {
-				if requireComplete && fallbackCount.Total > HardSize {
-					return DeliveryResult{
-						Status:      "error",
-						Provider:    "log_platform",
-						Code:        "CK_LOGS_RECIPIENT_FALLBACK_UNRESOLVED",
-						Entries:     []Entry{},
-						Limitations: []string{"收件人精确查询未命中，候选数量超过明细上限，无法完整确认目标收件人是否存在；不能据此断言无记录。"},
-					}
-				}
-				fallbackDetails := s.Client.Query(ctx, fallbackFilters, QueryOptions{PageSize: HardSize})
-				if !fallbackDetails.OK {
-					return DeliveryResult{
-						Status:   "error",
-						Provider: "log_platform",
-						Code:     ckLogsCode(fallbackDetails.ErrorKind),
-						Entries:  []Entry{},
-						Limitations: []string{
-							"收件人精确查询未命中，候选回查也未完成（" + fallbackDetails.ErrorKind + ": " + fallbackDetails.Message + "）；不能据此断言无记录。",
-						},
-					}
-				}
-				var matched []Entry
-				for _, entry := range fallbackDetails.Entries {
-					if entryHasRecipient(entry, derived.Recipient) {
-						matched = append(matched, entry)
-					}
-				}
-				if fallbackCount.Total > len(fallbackDetails.Entries) {
-					return DeliveryResult{
-						Status:   "error",
-						Provider: "log_platform",
-						Code:     "CK_LOGS_RECIPIENT_FALLBACK_UNRESOLVED",
-						Entries:  []Entry{},
-						Limitations: []string{
-							"收件人精确查询未命中，候选共 " + itoa(fallbackCount.Total) + " 条但明细只返回 " + itoa(len(fallbackDetails.Entries)) + " 条，无法确认目标收件人是否存在；不能据此断言无记录。",
-						},
-					}
-				}
-				if len(matched) > 0 {
-					return DeliveryResult{
-						Status:      "ok",
-						Provider:    "log_platform",
-						Total:       ptrInt(len(matched)),
-						Entries:     matched,
-						Limitations: []string{"收件人精确条件未直接命中；已按发件人/主题/时间取候选，并对 CK 分号拼接收件人做本地完整地址核对。"},
-						CountOnly:   ptrBool(false),
-						HasMore:     ptrBool(false),
-					}
-				}
-			}
+			// No verified indexed token field exists for compound recipient values.
+			// Removing Recipient loses the inbound account boundary; repeating the
+			// same phrase query cannot prove compound-address coverage either.
+			return recipientCoverageUnresolved("MTA", "CK_LOGS_RECIPIENT_FALLBACK_UNRESOLVED")
 		}
 		zeroNote := "该时间窗内按给定条件精确命中 0 条：我方日志无对应投递记录（非查询失败、非截断）。"
 		if sameSenderRecipient {
@@ -150,7 +99,7 @@ func (s *Service) queryMTA(ctx context.Context, filters Filters, derived derived
 			HasMore:     ptrBool(false),
 		}
 	}
-	res := s.Client.Query(ctx, filters, QueryOptions{PageSize: HardSize})
+	res := s.Client.Query(ctx, filters, QueryOptions{PageSize: HardSize, Stage: "mta_exact_detail"})
 	if !res.OK {
 		if requireComplete {
 			return mtaFailure(res)
@@ -175,14 +124,14 @@ func (s *Service) queryMTA(ctx context.Context, filters Filters, derived derived
 	if entries == nil {
 		entries = []Entry{}
 	}
-	if requireComplete && (countRes.Total > len(entries) || res.Total > len(entries)) {
+	if requireComplete && (!res.TotalExact || countRes.Total != res.Total || res.Total != len(entries)) {
 		return DeliveryResult{
 			Status:      "error",
 			Provider:    "log_platform",
 			Code:        "CK_LOGS_MTA_TRUNCATED",
 			Total:       ptrInt(countRes.Total),
 			Entries:     []Entry{},
-			Limitations: []string{"MTA 明细未完整取回，无法完成本地精确过滤与聚合；本次不返回不完整结果。"},
+			Limitations: []string{"MTA 明细未完整取回，无法完成本地精确过滤与聚合；本次不返回不完整结果。" + narrowQueryAdvice},
 			Truncated:   ptrBool(true),
 			CountOnly:   ptrBool(false),
 			HasMore:     ptrBool(false),
@@ -205,19 +154,4 @@ func mtaFailure(res QueryResult) DeliveryResult {
 		msg = timeoutMessage()
 	}
 	return deliveryError(ckLogsCode(res.ErrorKind), msg, nil)
-}
-
-func entryHasRecipient(entry Entry, target string) bool {
-	expected := ExtractAddr(target)
-	if expected == "" {
-		return false
-	}
-	for _, value := range entry.Recipients {
-		for _, part := range strings.Split(strings.ReplaceAll(value, ";", ","), ",") {
-			if ExtractAddr(part) == expected {
-				return true
-			}
-		}
-	}
-	return false
 }

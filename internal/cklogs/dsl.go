@@ -238,6 +238,11 @@ func BuildDatasetBody(ds *Dataset, filters Filters, opts QueryOptions) (string, 
 			"sort":  []any{map[string]any{"timestamp": map[string]any{"order": "desc"}}},
 			"query": map[string]any{"bool": map[string]any{"filter": filter}},
 		}
+		if ds.Kind == "delivery_agent" {
+			detail := body.(map[string]any)
+			detail["size"] = pageSizeFrom(opts)
+			detail["from"] = offsetFrom(opts)
+		}
 	}
 	return ndjson(header, body)
 }

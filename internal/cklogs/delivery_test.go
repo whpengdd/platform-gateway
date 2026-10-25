@@ -677,7 +677,7 @@ func TestQuerySelfServiceDeliveryLog_datransTimeoutMessage(t *testing.T) {
 	if out.Status != "error" || out.Code != "CK_LOGS_TIMEOUT" {
 		t.Fatalf("%+v", out)
 	}
-	if len(out.Limitations) == 0 || out.Limitations[0] != "日志查询超过60秒，请缩小查询范围或增加查询条件后重试" {
+	if len(out.Limitations) == 0 || out.Limitations[0] != timeoutMessage() {
 		t.Fatalf("lim=%v", out.Limitations)
 	}
 }
@@ -898,16 +898,16 @@ func TestQuerySelfServiceDeliveryLog_inboundProxyKeepsEmptySubject(t *testing.T)
 	}
 }
 
-func TestQuerySelfServiceDeliveryLog_inboundThreeSourcesZero(t *testing.T) {
+func TestQuerySelfServiceDeliveryLog_inboundExactZeroCannotProveCompoundAbsence(t *testing.T) {
 	svc, n := newService(t, func(w http.ResponseWriter, r *http.Request) { w.Write(hitsBody(nil)) })
 	out := svc.QuerySelfServiceDelivery(context.Background(), inboundInput())
-	if out.Status != "ok" || out.Total == nil || *out.Total != 0 || len(out.Entries) != 0 {
+	if out.Status != "error" || out.Code != "CK_LOGS_PROXY_RECIPIENT_FALLBACK_UNRESOLVED" || out.Total != nil || len(out.Entries) != 0 {
 		t.Fatalf("%+v", out)
 	}
-	if !strings.Contains(strings.Join(out.Limitations, "\n"), "在所选时间范围及查询条件内，未发现发件方向我方系统投递该邮件") {
+	if !strings.Contains(strings.Join(out.Limitations, "\n"), "不能据此断言无记录") {
 		t.Fatalf("limitations=%v", out.Limitations)
 	}
-	if atomic.LoadInt32(n) != 4 {
+	if atomic.LoadInt32(n) != 3 {
 		t.Fatalf("calls=%d", *n)
 	}
 }
@@ -962,48 +962,25 @@ func TestQuerySelfServiceDeliveryLog_proxyTruncated(t *testing.T) {
 	}
 }
 
-func TestQueryProxy_recipientFallbackWithCompoundTo(t *testing.T) {
-	tests := []struct {
-		name         string
-		senderDomain string
-		from         string
-	}{
-		{name: "recipient only", from: "sender@other.net"},
-		{name: "sender domain and recipient", senderDomain: "example.net", from: "sender@example.net"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
+func TestQueryProxy_recipientFallbackRequiresVerifiedCoverage(t *testing.T) {
+	for _, domain := range []string{"", "example.net"} {
+		t.Run(domain, func(t *testing.T) {
 			input := inboundInput()
-			input.SenderDomain = tt.senderDomain
-			calls := 0
-			svc, _ := newService(t, func(w http.ResponseWriter, r *http.Request) {
-				calls++
+			input.SenderDomain = domain
+			svc, calls := newService(t, func(w http.ResponseWriter, r *http.Request) {
 				body := readBody(r)
-				switch calls {
-				case 1:
-					if !strings.Contains(body, `"to":"recipient@example.com"`) {
-						t.Fatalf("exact query missing recipient: %s", body)
-					}
-					w.Write(hitsBody(nil))
-				case 2:
-					if strings.Contains(body, `"to":"recipient@example.com"`) {
-						t.Fatalf("candidate query retained recipient: %s", body)
-					}
-					w.Write(hitsBodyTotal(1, nil))
-				default:
-					w.Write(hitsBody([]map[string]any{{
-						"tid": "PROXY-COMPOUND", "timestamp": float64(100), "from": tt.from,
-						"to": "other@example.com; recipient@example.com", "result": "reject",
-					}}))
+				if !strings.Contains(body, `"to":"recipient@example.com"`) {
+					t.Errorf("account constraint missing: %s", body)
 				}
+				w.Write(hitsBody(nil))
 			})
 			derived := deriveQuery(input)
 			out := svc.queryProxy(context.Background(), Filters{Recipient: derived.Recipient, TimeRange: input.TimeRange}, derived, 1, HardSize)
-			if out.Status != "ok" || out.Total == nil || *out.Total != 1 || len(out.Entries) != 1 || out.Entries[0].Tid != "PROXY-COMPOUND" {
+			if out.Status != "error" || out.Code != "CK_LOGS_PROXY_RECIPIENT_FALLBACK_UNRESOLVED" || out.Total != nil || len(out.Entries) != 0 {
 				t.Fatalf("%+v", out)
 			}
-			if calls != 3 {
-				t.Fatalf("calls=%d", calls)
+			if atomic.LoadInt32(calls) != 1 {
+				t.Fatalf("unverified candidate request was sent: calls=%d", *calls)
 			}
 		})
 	}

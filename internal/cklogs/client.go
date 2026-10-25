@@ -2,12 +2,16 @@ package cklogs
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -67,19 +71,42 @@ type kibanaMSearch struct {
 }
 
 type kibanaResponse struct {
-	Error json.RawMessage `json:"error"`
-	Hits  *struct {
+	Error    json.RawMessage `json:"error"`
+	TimedOut bool            `json:"timed_out"`
+	Shards   struct {
+		Failed int `json:"failed"`
+	} `json:"_shards"`
+	Hits *struct {
 		Total any `json:"total"`
 		Hits  []struct {
 			Source map[string]any `json:"_source"`
+			Index  string         `json:"_index"`
+			ID     string         `json:"_id"`
 		} `json:"hits"`
 	} `json:"hits"`
 }
 
-func (c *Client) msearch(ctx context.Context, body string, timeout time.Duration) (*kibanaMSearch, *QueryResult) {
+func (c *Client) msearch(ctx context.Context, body string, timeout time.Duration, opts QueryOptions) (*kibanaMSearch, *QueryResult) {
+	if opts.Stage == "" {
+		opts.Stage = opts.Dataset
+		if opts.Stage == "" {
+			opts.Stage = "mta"
+		}
+		if opts.CountOnly {
+			opts.Stage += "_count"
+		} else if opts.Offset > 0 {
+			opts.Stage += "_page"
+		} else {
+			opts.Stage += "_detail"
+		}
+	}
 	call := auditlog.KibanaCall{
-		Index:     msearchIndexes(body),
-		CountOnly: strings.Contains(body, `"size":0`),
+		Index:      msearchIndexes(body),
+		Stage:      opts.Stage,
+		Dataset:    opts.Dataset,
+		QueryHash:  fmt.Sprintf("%x", sha256.Sum256([]byte(body))),
+		QueryShape: queryShape(body),
+		CountOnly:  opts.CountOnly,
 	}
 	started := time.Now()
 	defer func() {
@@ -95,6 +122,10 @@ func (c *Client) msearch(ctx context.Context, body string, timeout time.Duration
 	if timeout <= 0 {
 		timeout = c.timeout()
 	}
+	if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) < timeout {
+		timeout = time.Until(deadline)
+	}
+	call.BudgetMS = max(int64(0), timeout.Milliseconds())
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	url := c.baseURL() + "/api/console/proxy?path=/_msearch&method=POST"
@@ -110,14 +141,31 @@ func (c *Client) msearch(ctx context.Context, body string, timeout time.Duration
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			call.ErrorKind = "timeout"
-			return nil, &QueryResult{ErrorKind: "timeout", Message: fmt.Sprintf("ck_logs timeout after %dms", timeout.Milliseconds())}
+			return nil, &QueryResult{ErrorKind: "timeout", Message: timeoutMessage()}
+		}
+		if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
+			call.ErrorKind = "canceled"
+			return nil, &QueryResult{ErrorKind: "canceled", Message: "ck_logs request canceled"}
 		}
 		call.ErrorKind = "network_error"
 		return nil, &QueryResult{ErrorKind: "network_error", Message: err.Error()}
 	}
 	defer resp.Body.Close()
 	call.HTTPStatus = resp.StatusCode
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	const maxResponseBytes = 8 << 20
+	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
+	if readErr != nil && ctx.Err() != nil {
+		kind := "canceled"
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			kind = "timeout"
+		}
+		call.ErrorKind = kind
+		return nil, &QueryResult{ErrorKind: kind, Message: readInterruptedMessage(kind)}
+	}
+	if readErr != nil || len(raw) > maxResponseBytes {
+		call.ErrorKind = "upstream_error"
+		return nil, &QueryResult{ErrorKind: "upstream_error", Message: "ck_logs response incomplete or exceeds 8 MiB"}
+	}
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 		call.ErrorKind = "auth_error"
 		return nil, &QueryResult{ErrorKind: "auth_error", Message: fmt.Sprintf("ck_logs auth failed: HTTP %d", resp.StatusCode)}
@@ -136,7 +184,22 @@ func (c *Client) msearch(ctx context.Context, body string, timeout time.Duration
 		call.Entries = len(hits)
 		call.Total = readTotal(data.Responses[0].Hits.Total, len(hits))
 	}
-	call.OK = true
+	call.OK = len(data.Responses) > 0
+	if opts.Stage != "trace" && len(data.Responses) != 1 {
+		call.OK = false
+	}
+	for _, r := range data.Responses {
+		if responseFailure(r) != "" {
+			call.OK = false
+			call.ErrorKind = "upstream_error"
+		}
+	}
+	if !call.OK {
+		call.ErrorKind = "upstream_error"
+	}
+	if len(data.Responses) > 0 && data.Responses[0].Hits != nil {
+		call.TotalExact, _ = totalExact(data.Responses[0].Hits.Total)
+	}
 	return &data, nil
 }
 
@@ -184,23 +247,16 @@ func (c *Client) Query(ctx context.Context, filters Filters, opts QueryOptions) 
 	if err != nil {
 		return QueryResult{ErrorKind: "network_error", Message: err.Error()}
 	}
-	data, fail := c.msearch(ctx, body, c.timeout())
+	data, fail := c.msearch(ctx, body, c.timeout(), opts)
 	if fail != nil {
 		return *fail
 	}
-	if len(data.Responses) == 0 {
+	if len(data.Responses) != 1 {
 		return QueryResult{ErrorKind: "upstream_error", Message: "ck_logs response error: null"}
 	}
 	r := data.Responses[0]
-	if len(r.Error) > 0 && string(r.Error) != "null" {
-		msg := string(r.Error)
-		if len(msg) > 200 {
-			msg = msg[:200]
-		}
-		return QueryResult{ErrorKind: "upstream_error", Message: "ck_logs response error: " + msg}
-	}
-	if r.Hits == nil {
-		return QueryResult{OK: true, Entries: []Entry{}, Total: 0}
+	if msg := responseFailure(r); msg != "" {
+		return QueryResult{ErrorKind: "upstream_error", Message: msg}
 	}
 	hits := r.Hits.Hits
 	total := readTotal(r.Hits.Total, len(hits))
@@ -221,7 +277,14 @@ func (c *Client) Query(ctx context.Context, filters Filters, opts QueryOptions) 
 			entries = append(entries, mapHitToEntry(src))
 		}
 	}
-	return QueryResult{OK: true, Entries: entries, Total: total}
+	exact, relation := totalExact(r.Hits.Total)
+	ids := make([]string, len(hits))
+	for i, hit := range hits {
+		if hit.ID != "" {
+			ids[i] = hit.Index + "\x00" + hit.ID
+		}
+	}
+	return QueryResult{OK: true, Entries: entries, Total: total, TotalExact: exact, TotalRelation: relation, HitIDs: ids}
 }
 
 func (c *Client) QueryAuth(ctx context.Context, filters Filters, opts QueryOptions) (QueryResult, []AuthEntry) {
@@ -236,23 +299,16 @@ func (c *Client) QueryAuth(ctx context.Context, filters Filters, opts QueryOptio
 	if err != nil {
 		return QueryResult{ErrorKind: "network_error", Message: err.Error()}, nil
 	}
-	data, fail := c.msearch(ctx, body, c.timeout())
+	data, fail := c.msearch(ctx, body, c.timeout(), opts)
 	if fail != nil {
 		return *fail, nil
 	}
-	if len(data.Responses) == 0 {
+	if len(data.Responses) != 1 {
 		return QueryResult{ErrorKind: "upstream_error", Message: "ck_logs response error: null"}, nil
 	}
 	r := data.Responses[0]
-	if len(r.Error) > 0 && string(r.Error) != "null" {
-		msg := string(r.Error)
-		if len(msg) > 200 {
-			msg = msg[:200]
-		}
-		return QueryResult{ErrorKind: "upstream_error", Message: "ck_logs response error: " + msg}, nil
-	}
-	if r.Hits == nil {
-		return QueryResult{OK: true, Total: 0}, []AuthEntry{}
+	if msg := responseFailure(r); msg != "" {
+		return QueryResult{ErrorKind: "upstream_error", Message: msg}, nil
 	}
 	hits := r.Hits.Hits
 	total := readTotal(r.Hits.Total, len(hits))
@@ -264,7 +320,8 @@ func (c *Client) QueryAuth(ctx context.Context, filters Filters, opts QueryOptio
 		}
 		entries = append(entries, mapAuthHitToEntry(src, ds))
 	}
-	return QueryResult{OK: true, Total: total}, entries
+	exact, relation := totalExact(r.Hits.Total)
+	return QueryResult{OK: true, Total: total, TotalExact: exact, TotalRelation: relation}, entries
 }
 
 func (c *Client) Trace(ctx context.Context, tid string, tr TimeRange) TraceResult {
@@ -272,7 +329,7 @@ func (c *Client) Trace(ctx context.Context, tid string, tr TimeRange) TraceResul
 	if err != nil {
 		return TraceResult{ErrorKind: "network_error", Message: err.Error()}
 	}
-	data, fail := c.msearch(ctx, body, c.timeout())
+	data, fail := c.msearch(ctx, body, c.timeout(), QueryOptions{Stage: "trace"})
 	if fail != nil {
 		return TraceResult{ErrorKind: fail.ErrorKind, Message: fail.Message}
 	}
@@ -285,15 +342,8 @@ func (c *Client) Trace(ctx context.Context, tid string, tr TimeRange) TraceResul
 			continue
 		}
 		r := responses[i]
-		if len(r.Error) > 0 && string(r.Error) != "null" {
-			msg := string(r.Error)
-			if len(msg) > 200 {
-				msg = msg[:200]
-			}
+		if msg := responseFailure(r); msg != "" {
 			partial = append(partial, PartialFailure{Source: meta.Source, Index: meta.Index, Message: msg})
-			continue
-		}
-		if r.Hits == nil {
 			continue
 		}
 		for _, h := range r.Hits.Hits {
@@ -335,4 +385,127 @@ func ckLogsCode(kind string) string {
 		kind = "unknown"
 	}
 	return "CK_LOGS_" + strings.ToUpper(kind)
+}
+
+// responseFailure treats incomplete search results as failures, never empty success.
+func responseFailure(r kibanaResponse) string {
+	if len(r.Error) > 0 && string(r.Error) != "null" {
+		return "ck_logs subquery failed"
+	}
+	if r.TimedOut {
+		return timeoutMessage()
+	}
+	if r.Shards.Failed > 0 {
+		return "ck_logs subquery has failed shards"
+	}
+	if r.Hits == nil {
+		return "ck_logs response missing hits"
+	}
+	return ""
+}
+
+func validTotal(v any) bool {
+	n, ok := asFloat(v)
+	return ok && !math.IsNaN(n) && !math.IsInf(n, 0) && n >= 0 && math.Trunc(n) == n && n < float64(uint64(1)<<(strconv.IntSize-1))
+}
+
+func totalExact(v any) (bool, string) {
+	switch t := v.(type) {
+	case float64, int:
+		return validTotal(v), "eq"
+	case map[string]any:
+		relation, _ := t["relation"].(string)
+		return validTotal(t["value"]) && relation == "eq", relation
+	}
+	return false, ""
+}
+
+// queryShape records bounded structural diagnostics only. Literal filter values and index
+// names and credentials never enter this summary; the hash identifies the DSL.
+func queryShape(body string) string {
+	var shapes []string
+	lines := strings.Split(strings.TrimSpace(body), "\n")
+	for i := 1; i < len(lines) && len(shapes) < 12; i += 2 {
+		var q map[string]any
+		if json.Unmarshal([]byte(lines[i]), &q) != nil {
+			continue
+		}
+		ops := map[string]bool{}
+		collectQueryShape(q["query"], ops, 0)
+		parts := make([]string, 0, len(ops))
+		for key := range ops {
+			parts = append(parts, key)
+		}
+		sort.Strings(parts)
+		shapes = append(shapes, fmt.Sprintf("size=%v,from=%v,sort=%t,query=%t,clauses=[%s]", shapeNumber(q["size"]), shapeNumber(q["from"]), q["sort"] != nil, q["query"] != nil, strings.Join(parts, ",")))
+
+	}
+	summary := strings.Join(shapes, ";")
+	if len(summary) > 2048 {
+		summary = summary[:2048] + "[clipped]"
+	}
+	return summary
+}
+
+func shapeNumber(v any) int {
+	n, ok := v.(float64)
+	if !ok || n < 0 || n > 1e9 {
+		return 0
+	}
+	return int(n)
+}
+
+func collectQueryShape(v any, out map[string]bool, depth int) {
+	if depth > 16 || len(out) > 64 {
+		return
+	}
+	switch t := v.(type) {
+	case []any:
+		for _, child := range t {
+			collectQueryShape(child, out, depth+1)
+		}
+	case map[string]any:
+		for key, child := range t {
+			switch key {
+			case "term", "match_phrase", "range", "wildcard", "terms", "regexp":
+				if fields, ok := child.(map[string]any); ok {
+					for field, bounds := range fields {
+						// Only schema field identifiers are retained; never arbitrary keys.
+						if safeShapeField(field) {
+							out[key+":"+field] = true
+						}
+						if key == "range" {
+							if b, ok := bounds.(map[string]any); ok {
+								from, fok := asFloat(b["gte"])
+								to, tok := asFloat(b["lt"])
+								if !tok {
+									to, tok = asFloat(b["lte"])
+								}
+								if fok && tok && to >= from {
+									out[fmt.Sprintf("window_ms=%.0f", to-from)] = true
+								}
+							}
+						}
+					}
+				}
+			case "bool", "filter", "must", "must_not", "should":
+				out[key] = true
+				collectQueryShape(child, out, depth+1)
+			}
+		}
+	}
+}
+func safeShapeField(field string) bool {
+	switch field {
+	case "@timestamp", "timestamp", "sender", "rcpt", "subject", "tid", "mailtid", "from", "to", "mailfrom", "cmd", "authuser", "loginname", "user", "func", "dn", "ip":
+		return true
+	}
+	return false
+}
+
+func readInterruptedMessage(kind string) string {
+	if kind == "timeout" {
+		return timeoutMessage()
+	}
+	return "ck_logs response read interrupted"
 }
