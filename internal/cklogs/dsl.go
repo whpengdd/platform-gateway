@@ -240,7 +240,11 @@ func BuildDatasetBody(ds *Dataset, filters Filters, opts QueryOptions) (string, 
 		}
 		if ds.Kind == "delivery_agent" {
 			detail := body.(map[string]any)
-			detail["size"] = pageSizeFrom(opts)
+			size := pageSizeFrom(opts)
+			if opts.FullSize && opts.PageSize > 0 && opts.PageSize <= maxDeliveryAgentEntries {
+				size = opts.PageSize
+			}
+			detail["size"] = size
 			detail["from"] = offsetFrom(opts)
 		}
 	}

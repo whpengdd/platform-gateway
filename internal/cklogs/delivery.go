@@ -199,7 +199,7 @@ func (s *Service) QuerySelfServiceDelivery(ctx context.Context, in DeliveryQuery
 	const maxUnknownTidLookups = 8
 	lim := []string{}
 	if da.Total > HardSize {
-		lim = append(lim, "DATRANS 已按固定时间窗分页取回；上游未提供快照，查询期间的迟到或变更日志可能影响跨页一致性。")
+		lim = append(lim, "DATRANS 已在计数后单页全量取回；上游未提供快照，查询期间的迟到或变更日志可能影响计数与明细的一致性。")
 	}
 	if len(unknownTids) > maxUnknownTidLookups {
 		unknownTids = unknownTids[:maxUnknownTidLookups]

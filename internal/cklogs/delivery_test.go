@@ -134,7 +134,7 @@ func TestQuerySelfServiceDeliveryLog_mainActionsAndBounceReason(t *testing.T) {
 	if failed0 == nil || failed0.Cmd != "remote" || failed0.Result != "2" || failed0.FailureReason != "收件人地址不存在，请核对后重试" || failed0.StatusText != "收件人地址不存在，请核对后重试" {
 		t.Fatalf("failed0=%+v", failed0)
 	}
-	if atomic.LoadInt32(n) != 1 {
+	if atomic.LoadInt32(n) != 2 {
 		t.Fatalf("calls=%d", *n)
 	}
 }
@@ -336,7 +336,7 @@ func TestQuerySelfServiceDeliveryLog_preferValidStatusThenNewer(t *testing.T) {
 	if eq == nil || eq.Tid != "T-new" || eq.Cmd != "remote" || eq.Result != "2" || eq.DeliveryStatus != "failed" {
 		t.Fatalf("eq=%+v", eq)
 	}
-	if atomic.LoadInt32(n) != 1 {
+	if atomic.LoadInt32(n) != 2 {
 		t.Fatalf("calls=%d", *n)
 	}
 }
@@ -405,7 +405,7 @@ func TestQuerySelfServiceDeliveryLog_mtaFallbackWhenDARawHitsHaveNoEffectiveRows
 	if out.Entries[0].StatusSource != "mta" || out.Entries[0].DeliveryStatus != "failed" || out.Entries[0].Tid != "MTA-EFFECTIVE" {
 		t.Fatalf("%+v", out.Entries[0])
 	}
-	if atomic.LoadInt32(n) != 3 {
+	if atomic.LoadInt32(n) != 4 {
 		t.Fatalf("calls=%d", *n)
 	}
 }
@@ -416,6 +416,10 @@ func TestQuerySelfServiceDeliveryLog_bounceOnlyKeepsUnknown(t *testing.T) {
 		body := readBody(r)
 		if !strings.Contains(body, "datrans_distributed") {
 			t.Errorf("unexpected body %s", body)
+		}
+		if strings.Contains(body, `"size":0`) {
+			w.Write(hitsBodyTotal(1, nil))
+			return
 		}
 		w.Write(hitsBody([]map[string]any{{
 			"tid": "BOUNCE-ONLY", "timestamp": float64(100), "mailfrom": input.Sender,
@@ -430,7 +434,7 @@ func TestQuerySelfServiceDeliveryLog_bounceOnlyKeepsUnknown(t *testing.T) {
 	if e.StatusSource != "da" || e.DeliveryStatus != "unknown" || e.Cmd != "bounce" || e.Result != "0" {
 		t.Fatalf("%+v", e)
 	}
-	if atomic.LoadInt32(n) != 1 {
+	if atomic.LoadInt32(n) != 2 {
 		t.Fatalf("calls=%d", *n)
 	}
 }
@@ -448,7 +452,7 @@ func TestQuerySelfServiceDeliveryLog_scanOnlyKeepsUnknown(t *testing.T) {
 	if e.StatusSource != "da" || e.DeliveryStatus != "unknown" || e.Cmd != "scan" || e.Result != "0" {
 		t.Fatalf("%+v", e)
 	}
-	if atomic.LoadInt32(n) != 1 {
+	if atomic.LoadInt32(n) != 2 {
 		t.Fatalf("calls=%d", *n)
 	}
 }
@@ -458,6 +462,10 @@ func TestQuerySelfServiceDeliveryLog_unknownMainActionLooksUpTid(t *testing.T) {
 	svc, n := newService(t, func(w http.ResponseWriter, r *http.Request) {
 		body := readBody(r)
 		if strings.Contains(body, "datrans_distributed") {
+			if strings.Contains(body, `"size":0`) {
+				w.Write(hitsBodyTotal(1, nil))
+				return
+			}
 			w.Write(hitsBody([]map[string]any{{
 				"tid": "UNKNOWN-TID", "mid": "MID-U", "timestamp": float64(100), "mailfrom": input.Sender,
 				"to": "u@example.com", "cmd": "local", "result": "unexpected",
@@ -480,7 +488,7 @@ func TestQuerySelfServiceDeliveryLog_unknownMainActionLooksUpTid(t *testing.T) {
 	if out.Entries[0].StatusSource != "mta" || out.Entries[0].DeliveryStatus != "failed" || out.Entries[0].Tid != "UNKNOWN-TID" {
 		t.Fatalf("%+v", out.Entries[0])
 	}
-	if atomic.LoadInt32(n) != 3 {
+	if atomic.LoadInt32(n) != 4 {
 		t.Fatalf("calls=%d", *n)
 	}
 }
@@ -511,7 +519,7 @@ func TestQuerySelfServiceDeliveryLog_multiTidKeepsUnknown(t *testing.T) {
 	if !foundSame || !foundMsg {
 		t.Fatalf("%+v", out.Entries)
 	}
-	if atomic.LoadInt32(n) != 1 {
+	if atomic.LoadInt32(n) != 2 {
 		t.Fatalf("calls=%d", *n)
 	}
 }
@@ -521,6 +529,10 @@ func TestQuerySelfServiceDeliveryLog_distinctPeersLookupSeparately(t *testing.T)
 	svc, n := newService(t, func(w http.ResponseWriter, r *http.Request) {
 		body := readBody(r)
 		if strings.Contains(body, "datrans_distributed") {
+			if strings.Contains(body, `"size":0`) {
+				w.Write(hitsBodyTotal(2, nil))
+				return
+			}
 			w.Write(hitsBody([]map[string]any{
 				{"tid": "T-PEER-X", "mid": "MID-GROUP", "timestamp": float64(100), "mailfrom": input.Sender, "to": "x@example.com", "cmd": "local", "result": "unexpected"},
 				{"tid": "T-PEER-Y", "mid": "MID-GROUP", "timestamp": float64(200), "mailfrom": input.Sender, "to": "y@example.com", "cmd": "remote", "result": "unexpected"},
@@ -551,7 +563,7 @@ func TestQuerySelfServiceDeliveryLog_distinctPeersLookupSeparately(t *testing.T)
 			t.Fatalf("%+v", e)
 		}
 	}
-	if atomic.LoadInt32(n) != 5 {
+	if atomic.LoadInt32(n) != 6 {
 		t.Fatalf("calls=%d", *n)
 	}
 }
@@ -561,6 +573,10 @@ func TestQuerySelfServiceDeliveryLog_mtaLookupErrorPropagates(t *testing.T) {
 	svc, n := newService(t, func(w http.ResponseWriter, r *http.Request) {
 		body := readBody(r)
 		if strings.Contains(body, "datrans_distributed") {
+			if strings.Contains(body, `"size":0`) {
+				w.Write(hitsBodyTotal(1, nil))
+				return
+			}
 			w.Write(hitsBody([]map[string]any{{
 				"tid": "UNKNOWN-ERROR", "timestamp": float64(100), "mailfrom": input.Sender,
 				"to": "u@example.com", "cmd": "local", "result": "unexpected",
@@ -579,7 +595,7 @@ func TestQuerySelfServiceDeliveryLog_mtaLookupErrorPropagates(t *testing.T) {
 	if out.Entries == nil || len(out.Entries) != 0 {
 		t.Fatalf("error entries should be empty slice: %+v", out)
 	}
-	if atomic.LoadInt32(n) != 2 {
+	if atomic.LoadInt32(n) != 3 {
 		t.Fatalf("calls=%d", *n)
 	}
 }
@@ -597,6 +613,10 @@ func TestQuerySelfServiceDeliveryLog_unknownTidCapAddsLimitation(t *testing.T) {
 	svc, n := newService(t, func(w http.ResponseWriter, r *http.Request) {
 		body := readBody(r)
 		if strings.Contains(body, "datrans_distributed") {
+			if strings.Contains(body, `"size":0`) {
+				w.Write(hitsBodyTotal(9, nil))
+				return
+			}
 			w.Write(hitsBody(sources))
 			return
 		}
@@ -615,7 +635,7 @@ func TestQuerySelfServiceDeliveryLog_unknownTidCapAddsLimitation(t *testing.T) {
 	if !strings.Contains(joined, "MTA 回查已达上限") || !strings.Contains(joined, "不能据此断定投递结果") {
 		t.Fatalf("lim=%v", out.Limitations)
 	}
-	if atomic.LoadInt32(n) != 1+8 {
+	if atomic.LoadInt32(n) != 2+8 {
 		t.Fatalf("calls=%d want 1 DATRANS + 8 MTA counts", *n)
 	}
 }
@@ -625,6 +645,10 @@ func TestQuerySelfServiceDeliveryLog_unknownTidTimeoutAddsLimitation(t *testing.
 	svc, n := newService(t, func(w http.ResponseWriter, r *http.Request) {
 		body := readBody(r)
 		if strings.Contains(body, "datrans_distributed") {
+			if strings.Contains(body, `"size":0`) {
+				w.Write(hitsBodyTotal(2, nil))
+				return
+			}
 			w.Write(hitsBody([]map[string]any{
 				{"tid": "U-A", "mid": "MA", "timestamp": float64(100), "mailfrom": input.Sender, "to": "a@example.com", "cmd": "local", "result": "unexpected"},
 				{"tid": "U-B", "mid": "MB", "timestamp": float64(200), "mailfrom": input.Sender, "to": "b@example.com", "cmd": "local", "result": "unexpected"},
@@ -650,7 +674,7 @@ func TestQuerySelfServiceDeliveryLog_unknownTidTimeoutAddsLimitation(t *testing.
 	if !strings.Contains(joined, "MTA 回查超时") || !strings.Contains(joined, "不能据此断定投递结果") {
 		t.Fatalf("lim=%v", out.Limitations)
 	}
-	if atomic.LoadInt32(n) != 2 {
+	if atomic.LoadInt32(n) != 3 {
 		t.Fatalf("calls=%d want DATRANS + first MTA", *n)
 	}
 }
@@ -691,6 +715,10 @@ func TestQuerySelfServiceDeliveryLog_subjectAndDomainAreLocalFilters(t *testing.
 		if !strings.Contains(body, "datrans_distributed") {
 			t.Errorf("want datrans, got %s", body)
 		}
+		if strings.Contains(body, `"size":0`) {
+			w.Write(hitsBodyTotal(3, nil))
+			return
+		}
 		if !strings.Contains(body, `"mailfrom":"sender@example.com"`) {
 			t.Errorf("missing mailfrom: %s", body)
 		}
@@ -710,7 +738,7 @@ func TestQuerySelfServiceDeliveryLog_subjectAndDomainAreLocalFilters(t *testing.
 	if out.Entries[0].Peer != "a@example.net" || out.Entries[0].Subject != "Wells notice" {
 		t.Fatalf("%+v", out.Entries[0])
 	}
-	if atomic.LoadInt32(n) != 1 {
+	if atomic.LoadInt32(n) != 2 {
 		t.Fatalf("calls=%d", *n)
 	}
 }
