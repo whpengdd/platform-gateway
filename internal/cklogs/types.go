@@ -26,6 +26,9 @@ type QueryOptions struct {
 	CountOnly bool
 	PageSize  int
 	Offset    int
+	// FullSize lets delivery_agent detail requests bypass the HardSize clamp
+	// for one single full-fetch page bounded by maxDeliveryAgentEntries.
+	FullSize bool
 }
 
 type QueryResult struct {

@@ -1,92 +1,50 @@
 package cklogs
 
-import (
-	"context"
-	"crypto/sha256"
-	"encoding/json"
-	"time"
-)
+import "context"
 
-// This is an offset protocol, not a snapshot protocol. Strictly separated
-// timestamp boundaries avoid unstable ties without assuming an undocumented
-// unique sortable field. Late writes can still alter an otherwise valid window.
-const maxDeliveryAgentEntries = 5000
+// The console proxy honors `size` but silently ignores the `from` offset
+// (verified against production on 2026-10-26: from=500 returns the leading
+// 500 hits again). Full retrieval therefore uses one exact count followed by
+// a single page of size=total instead of offset paging. This is still not a
+// snapshot protocol: late writes can alter the window between count and
+// detail, and the count/detail totals must agree.
+//
+// The 4000-entry guard keeps one full page under the 8 MiB response cap
+// (measured ~1.5 KiB per DATRANS source document, ~28% headroom).
+const maxDeliveryAgentEntries = 4000
 
 func (s *Service) queryDeliveryAgentPages(ctx context.Context, filters Filters) (QueryResult, string) {
-	var collected []Entry
-	var first QueryResult
-	seenPages := map[[32]byte]bool{}
-	seenIDs := map[string]bool{}
-	var previous time.Time
-	for offset := 0; offset < maxDeliveryAgentEntries; {
-		if ctx.Err() != nil {
-			kind := "network_error"
-			if ctx.Err() == context.DeadlineExceeded {
-				kind = "timeout"
-			}
-			return QueryResult{ErrorKind: kind, Message: ctx.Err().Error()}, ""
+	if ctx.Err() != nil {
+		kind := "network_error"
+		if ctx.Err() == context.DeadlineExceeded {
+			kind = "timeout"
 		}
-		current := s.Client.Query(ctx, filters, QueryOptions{Dataset: "delivery_agent", PageSize: HardSize, Offset: offset, Stage: "da_page"})
-		if !current.OK {
-			return current, ""
-		}
-		if offset == 0 {
-			first = current
-		}
-		fail := func(message string) (QueryResult, string) { first.Entries = nil; return first, message }
-		if !current.TotalExact {
-			return fail("DATRANS 总数不精确，无法确认完整性")
-		}
-		if current.Total > maxDeliveryAgentEntries {
-			return fail("DATRANS 原始日志超过全量护栏（" + itoa(maxDeliveryAgentEntries) + " 条）")
-		}
-		if current.Total != first.Total {
-			return fail("DATRANS 分页期间总数变化")
-		}
-		expected := first.Total - offset
-		if expected > HardSize {
-			expected = HardSize
-		}
-		if len(current.Entries) != expected {
-			return fail("DATRANS 分页返回条数不足或异常")
-		}
-		if first.Total > HardSize {
-			raw, _ := json.Marshal(current.Entries)
-			digest := sha256.Sum256(raw)
-			if seenPages[digest] {
-				return fail("DATRANS 重复分页，无法确认完整性")
-			}
-			seenPages[digest] = true
-			for _, id := range current.HitIDs {
-				if id == "" {
-					continue
-				}
-				if seenIDs[id] {
-					return fail("DATRANS 跨页出现重复日志标识")
-				}
-				seenIDs[id] = true
-			}
-			for i, entry := range current.Entries {
-				stamp, err := time.Parse(time.RFC3339Nano, entry.TimestampISO)
-				if err != nil {
-					return fail("DATRANS 分页缺少有效排序时间")
-				}
-				if i == 0 && offset > 0 && !stamp.Before(previous) {
-					return fail("DATRANS 分页边界时间重复或顺序变化，无法安全取全")
-				}
-				if i > 0 && stamp.After(previous) {
-					return fail("DATRANS 分页排序异常")
-				}
-				previous = stamp
-			}
-		}
-		collected = append(collected, current.Entries...)
-		offset += len(current.Entries)
-		if offset == first.Total {
-			first.Entries = collected
-			return first, ""
-		}
+		return QueryResult{ErrorKind: kind, Message: ctx.Err().Error()}, ""
 	}
-	first.Entries = nil
-	return first, "DATRANS 分页达到全量护栏"
+	count := s.Client.Query(ctx, filters, QueryOptions{Dataset: "delivery_agent", CountOnly: true, Stage: "da_count"})
+	if !count.OK {
+		return count, ""
+	}
+	fail := func(message string) (QueryResult, string) { count.Entries = nil; return count, message }
+	if !count.TotalExact {
+		return fail("DATRANS 总数不精确，无法确认完整性")
+	}
+	if count.Total > maxDeliveryAgentEntries {
+		return fail("DATRANS 原始日志超过全量护栏（" + itoa(maxDeliveryAgentEntries) + " 条）")
+	}
+	if count.Total == 0 {
+		count.Entries = []Entry{}
+		return count, ""
+	}
+	detail := s.Client.Query(ctx, filters, QueryOptions{Dataset: "delivery_agent", PageSize: count.Total, Stage: "da_full", FullSize: true})
+	if !detail.OK {
+		return detail, ""
+	}
+	if !detail.TotalExact || detail.Total != count.Total {
+		return fail("DATRANS 计数与明细总数不一致")
+	}
+	if len(detail.Entries) != count.Total {
+		return fail("DATRANS 全量取回返回条数不足或异常")
+	}
+	return detail, ""
 }
