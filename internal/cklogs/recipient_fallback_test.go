@@ -44,6 +44,30 @@ func TestMTARecipientFallbackNeverDropsAccount(t *testing.T) {
 	}
 }
 
+func TestSubjectMatchesNormalizesReplyPrefixesAndWhitespace(t *testing.T) {
+	cases := []struct {
+		actual, requested string
+	}{
+		{"Re: Re: Re: Re: P76243 NJ TO AUCKLAND, 1*20GP,  10/19完成  SO#279522525", "Re: Re: P76243 NJ TO AUCKLAND, 1*20GP, 10/19完成 SO#279522525"},
+		{"回复: 回复: 项目通知", "项目通知"},
+		{"  Re: Subject\tline 2 ", "subject line 2"},
+	}
+	for _, tc := range cases {
+		if !subjectMatches(tc.actual, tc.requested) {
+			t.Errorf("subjectMatches(%q, %q) = false", tc.actual, tc.requested)
+		}
+	}
+	if subjectMatches("P76243", "AUCKLAND") {
+		t.Fatal("unrelated subjects must not match")
+	}
+	if subjectMatches("", "wanted") {
+		t.Fatal("empty actual subject must not satisfy a subject filter")
+	}
+	if subjectMatches("27涓撳崥鐢宠-鍗庝腑绉戞妧澶у-鑻忛潤", "27专博申请-华中科技大学-苏静") {
+		t.Fatal("ambiguous legacy encoding must not be guessed")
+	}
+}
+
 func TestProxyConditionsCompoundFullAddress(t *testing.T) {
 	for _, value := range []string{"USER@example.com; other@example.net", "other@example.net, USER@example.com", "other@example.net; USER@example.com; third@example.net"} {
 		entry := Entry{Recipients: []string{value}}

@@ -3,6 +3,7 @@ package cklogs
 import (
 	"regexp"
 	"strings"
+	"unicode"
 )
 
 var (
@@ -199,7 +200,40 @@ func matchesProxyConditions(entry Entry, derived derivedQuery) bool {
 	if !matchesDeliveryConditions(entry, withoutSubject) {
 		return false
 	}
-	return derived.Subject == "" || strings.TrimSpace(entry.Subject) == "" || strings.Contains(strings.ToLower(entry.Subject), strings.ToLower(derived.Subject))
+	return derived.Subject == "" || strings.TrimSpace(entry.Subject) == "" || subjectMatches(entry.Subject, derived.Subject)
+}
+
+func subjectMatches(actual, requested string) bool {
+	for _, actualForm := range subjectForms(actual) {
+		for _, requestedForm := range subjectForms(requested) {
+			if actualForm != "" && requestedForm != "" && strings.Contains(actualForm, requestedForm) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func subjectForms(subject string) []string {
+	return []string{normalizeSubject(subject)}
+}
+
+func normalizeSubject(subject string) string {
+	subject = strings.ToLower(strings.TrimSpace(subject))
+	for {
+		trimmed := strings.TrimLeftFunc(subject, unicode.IsSpace)
+		lower := strings.ToLower(trimmed)
+		if strings.HasPrefix(lower, "re:") {
+			subject = strings.TrimLeftFunc(trimmed[len("re:"):], unicode.IsSpace)
+			continue
+		}
+		if strings.HasPrefix(trimmed, "回复:") {
+			subject = strings.TrimLeftFunc(trimmed[len("回复:"):], unicode.IsSpace)
+			continue
+		}
+		break
+	}
+	return strings.Join(strings.FieldsFunc(subject, unicode.IsSpace), " ")
 }
 
 func matchesDeliveryConditions(entry Entry, derived derivedQuery) bool {
@@ -228,7 +262,7 @@ func matchesDeliveryConditions(entry Entry, derived derivedQuery) bool {
 	if derived.RecipientDomain != "" && !entryHasAddressDomain(entry, "recipient", derived.RecipientDomain) {
 		return false
 	}
-	if derived.Subject != "" && !strings.Contains(strings.ToLower(entry.Subject), strings.ToLower(derived.Subject)) {
+	if derived.Subject != "" && !subjectMatches(entry.Subject, derived.Subject) {
 		return false
 	}
 	return true

@@ -706,6 +706,30 @@ func TestQuerySelfServiceDeliveryLog_datransTimeoutMessage(t *testing.T) {
 	}
 }
 
+func TestQuerySelfServiceDeliveryLog_subjectIgnoresReplyPrefixAndWhitespaceDifferences(t *testing.T) {
+	input := testInput()
+	input.Recipient = "recipient@example.net"
+	input.Subject = "Re: Re: P76243 NJ TO AUCKLAND, 1*20GP, 10/19完成 SO#279522525"
+	svc, calls := newService(t, func(w http.ResponseWriter, r *http.Request) {
+		body := readBody(r)
+		if strings.Contains(body, `"size":0`) {
+			w.Write(hitsBodyTotal(2, nil))
+			return
+		}
+		w.Write(hitsBody([]map[string]any{
+			{"tid": "T1", "timestamp": float64(100), "mailfrom": input.Sender, "to": input.Recipient, "subject": "Re: Re: Re: Re: P76243 NJ TO AUCKLAND, 1*20GP,  10/19完成  SO#279522525", "cmd": "remote", "result": "0"},
+			{"tid": "T2", "timestamp": float64(200), "mailfrom": input.Sender, "to": input.Recipient, "subject": "Re: Re: Re: P76243 NJ TO AUCKLAND, 1*20GP, 10/19完成 SO#279522525", "cmd": "remote", "result": "0"},
+		}))
+	})
+	out := svc.QuerySelfServiceDelivery(context.Background(), input)
+	if out.Status != "ok" || out.Total == nil || *out.Total != 2 || len(out.Entries) != 2 {
+		t.Fatalf("reply prefixes and whitespace differences should preserve matching DA rows: %+v", out)
+	}
+	if atomic.LoadInt32(calls) != 2 {
+		t.Fatalf("unexpected MTA/proxy fallback calls: %d", *calls)
+	}
+}
+
 func TestQuerySelfServiceDeliveryLog_subjectAndDomainAreLocalFilters(t *testing.T) {
 	input := testInput()
 	input.RecipientDomain = "example.net"
