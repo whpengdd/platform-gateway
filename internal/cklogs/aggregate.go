@@ -67,6 +67,11 @@ func friendlyBounceReason(entry Entry) string {
 	lower := strings.ToLower(raw)
 	for _, p := range bouncePatterns {
 		if p.re.MatchString(lower) {
+			// Only refine the existing blacklist branch. Earlier diagnoses retain
+			// their priority, and explicit blacklist evidence is never overridden.
+			if p.text == "邮件被对方的黑名单策略拒收" && isSpamAdviceRejection(raw) {
+				return "收件方反垃圾策略拒收"
+			}
 			return p.text
 		}
 	}
