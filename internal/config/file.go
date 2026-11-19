@@ -26,11 +26,12 @@ type Project struct {
 	ReadFields     []string       `json:"readFields,omitempty"`
 }
 type File struct {
-	Tokens []Token `json:"tokens"`
-	Jira   *Jira   `json:"jira,omitempty"`
-	CKLogs CKLogs  `json:"cklogs,omitempty"`
-	Server Server  `json:"server,omitempty"`
-	Audit  Audit   `json:"audit,omitempty"`
+	Tokens         []Token         `json:"tokens"`
+	CustomerLookup *CustomerLookup `json:"customerLookup,omitempty"`
+	Jira           *Jira           `json:"jira,omitempty"`
+	CKLogs         CKLogs          `json:"cklogs,omitempty"`
+	Server         Server          `json:"server,omitempty"`
+	Audit          Audit           `json:"audit,omitempty"`
 }
 
 var ProjectKey = regexp.MustCompile(`^[A-Z][A-Z0-9_]{0,63}$`)

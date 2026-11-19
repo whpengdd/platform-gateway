@@ -227,3 +227,9 @@ curl --fail-with-body "$GW/v1/jira/projects/CS/issues" \
 ```
 
 数字字段仅接受经 float64 解码并重新编码为 JSON 后数值不变的表示。比较时允许 1、1.0、1e0 等同值形式；不能保真的数字（如 9007199254740993）在配置中导致启动失败，在请求中返回 400 invalid_body，不自动舍入。数字字面量最长 1024 字符，十进制指数限制在 -2048 至 2048；这些限额也约束精确比较的资源消耗。上游 JSON 数字不能保真时，读取返回 503；可能已完成的写入返回 502 outcome_unknown。
+
+### 客户信息查询
+
+`GET /v1/jira/customer-lookup` 供具有 `CS` 项目权限的 Bearer token 使用。查询参数透传至上游：`senderEmail`、`email`、`domain`、`name`、`phone`、`q`、`keyword`，以及可选的 `type`（`customer`、`cj`、`employee`）。不传 `type` 时返回上游成形的 `resolution`、`profile`、`prefillFields`、`variants` 和 `query`；客户未命中时需人工补录。查询条件缺失由上游返回 400。
+
+在网关配置文件中添加 `"customerLookup": {"baseUrl": "http://localhost:8787", "apiKey": "<上游密钥>"}`。`baseUrl` 是上游服务根地址；密钥仅放在实际配置中，勿提交仓库。未配置时接口返回 503。

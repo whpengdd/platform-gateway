@@ -56,13 +56,14 @@ func main() {
 		}
 	}
 	handler := httpapi.New(httpapi.Config{
-		Jira:   jiraHandler,
-		Auth:   checker,
-		CK:     cklogs.NewService(client),
-		Gate:   gate,
-		Audit:  audit,
-		CKUser: cfg.ckUser,
-		CKPass: cfg.ckPass,
+		Jira:           jiraHandler,
+		CustomerLookup: cfg.authFile.CustomerLookup,
+		Auth:           checker,
+		CK:             cklogs.NewService(client),
+		Gate:           gate,
+		Audit:          audit,
+		CKUser:         cfg.ckUser,
+		CKPass:         cfg.ckPass,
 	})
 	srv := &http.Server{
 		Addr:              cfg.listen,

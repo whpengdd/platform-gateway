@@ -10,6 +10,11 @@ import (
 	"time"
 )
 
+type CustomerLookup struct {
+	BaseURL string `json:"baseUrl"`
+	APIKey  string `json:"apiKey"`
+}
+
 type UpstreamAuth struct {
 	Type     string `json:"type"`
 	Token    string `json:"token,omitempty"`
@@ -124,6 +129,15 @@ func (f *File) validateApplication(b []byte) error {
 	}
 	if json.Unmarshal(b, &raw) != nil {
 		return invalid("$", "invalid JSON structure")
+	}
+	if f.CustomerLookup != nil {
+		if !validURL(f.CustomerLookup.BaseURL, true) {
+			return invalid("customerLookup.baseUrl", "must be an absolute HTTP or HTTPS URL without query, fragment, userinfo or unsafe path")
+		}
+		if f.CustomerLookup.APIKey == "" || strings.ContainsAny(f.CustomerLookup.APIKey, "\r\n") {
+			return invalid("customerLookup.apiKey", "required and must not contain CR or LF")
+		}
+		f.CustomerLookup.BaseURL = strings.TrimRight(f.CustomerLookup.BaseURL, "/")
 	}
 	if f.Jira != nil {
 		if raw.Jira.AccountCacheTtlSeconds == nil {

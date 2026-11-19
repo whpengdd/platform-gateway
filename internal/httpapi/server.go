@@ -14,18 +14,20 @@ import (
 	"platform-gateway/internal/auth"
 	"platform-gateway/internal/backend"
 	"platform-gateway/internal/cklogs"
+	"platform-gateway/internal/config"
 	"platform-gateway/internal/queue"
 )
 
 type Config struct {
-	Jira   http.Handler
-	Auth   *auth.Checker
-	CK     *cklogs.Service
-	Gate   backend.Gate
-	Audit  *auditlog.Writer
-	CKUser string
-	CKPass string
-	Now    func() time.Time
+	Jira           http.Handler
+	CustomerLookup *config.CustomerLookup
+	Auth           *auth.Checker
+	CK             *cklogs.Service
+	Gate           backend.Gate
+	Audit          *auditlog.Writer
+	CKUser         string
+	CKPass         string
+	Now            func() time.Time
 }
 
 type Server struct {
@@ -53,6 +55,7 @@ func New(cfg Config) http.Handler {
 		now:    now,
 	}
 	mux := http.NewServeMux()
+	mux.Handle("/v1/jira/customer-lookup", customerLookup(cfg.Auth, cfg.CustomerLookup))
 	if cfg.Jira != nil {
 		mux.Handle("/v1/jira/", cfg.Jira)
 	} else {
