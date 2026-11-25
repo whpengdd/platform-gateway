@@ -68,7 +68,7 @@ curl -sS -X POST "$GW/v1/cklogs/analysis/delivery" \
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/health` | 进程活着 |
-| GET | `/ready` | token 名单 + Kibana 账号都配了才 200 |
+| GET | `/ready` | token 名单 + 所选日志后端的账号都配了才 200 |
 
 ### 外网 token（自助）
 
@@ -94,6 +94,27 @@ curl -sS -X POST "$GW/v1/cklogs/analysis/delivery" \
 内部 token 仍禁止：raw DSL、index 名、把 `eml` 原文塞进 body。窗口/pageSize 硬顶是护 Kibana，不是租户授权。
 
 请求一律 `DisallowUnknownFields`：多一个字段就是 400 `unknown_field`。
+
+---
+
+## 1.1 日志后端 provider 与能力缺口
+
+`config.json` 的 `cklogs.provider` 选择日志后端：`kibana`（默认，Kibana console proxy）或 `logbot`（LogBot 异步任务 API）。切换对调用方透明：路径、请求校验、响应结构、token 权限与 FIFO 队列不变。
+
+provider=logbot 时，LogBot 实测不支持的接口能力返回 `status=not_available` 并在 `limitations` 说明原因，**不会**用空结果冒充无记录：
+
+| 能力 | logbot provider 下的行为 |
+|---|---|
+| `/v1/cklogs/delivery`、`analysis/delivery`（sender/recipient/subject/域名） | 可用；DA 只取 `cmd=local/remote` 行并去重，时间转 UTC；域名查询加 `platform_mode=all` |
+| `analysis/delivery` 的 `msgId` 筛选 | `not_available`（LogBot 无 tid/msgId 筛选） |
+| `/v1/cklogs/message`（按 tid 串联轨迹） | `not_available`（LogBot 行无 tid 列） |
+| `/v1/cklogs/login`、`analysis/auth`（pop3/webmail/smtp/imap） | `not_available`（登录日志类型在 LogBot 暂不支持查询；SMTP 登录理论上只有 MTA AUTH 行，且不能按账号过滤） |
+| `analysis/ops`（webmail/pop3 删信等操作） | `not_available`（同上） |
+| dasvr 投递流水（delivery_pipeline） | `not_available`（LogBot 无此来源） |
+
+来源完整性如实上报：LogBot 每来源展示上限 1000 行，达到时响应 `truncated=true` 且 `limitations` 写明可能还有更多；来源 `partial` 时给出已扫描截止时间（`scanned_through`），不写成「没有记录」；所需来源全部失败时返回 `status=error`。轮询在操作预算内完成，预算耗尽按超时语义返回（不返回 `total=0`）。
+
+Kibana 下线前需由 LogBot 方补齐的清单：tid 列与 tid/msgId 筛选、dasvr 投递流水、pop3/webmail 登录与操作日志来源、SMTP 登录按账号过滤。
 
 ---
 

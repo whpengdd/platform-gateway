@@ -81,6 +81,7 @@ GATEWAY_CONFIG_FILE=/custom/path/config.json
   },
   "cklogs": {
     "baseUrl": "https://ck-logs.icoremail.net",
+    "provider": "kibana",
     "auth": {
       "type": "basic",
       "username": "<user>",
@@ -92,6 +93,16 @@ GATEWAY_CONFIG_FILE=/custom/path/config.json
       "maxConcurrency": 2,
       "size": 32,
       "waitTimeoutMs": 30000
+    },
+    "logbot": {
+      "baseUrl": "https://logbot.icoremail.net",
+      "auth": {
+        "type": "login",
+        "username": "<logbot-user>",
+        "password": "<logbot-password>"
+      },
+      "pollIntervalMs": 500,
+      "timeoutMs": 90000
     }
   }
 }
@@ -200,8 +211,19 @@ Bearer 与 Basic 字段不能混用；凭据必须非空且不能含 CR/LF。JSO
 | jira.accountCacheTtlSeconds | 300秒；整数0–3600，0禁用已完成账号快照复用 |
 | jira.maxFieldBytes | 65536字节；整数1024–4194304，单个文本字段的 UTF-8 字节上限 |
 | cklogs.baseUrl / index | https://ck-logs.icoremail.net / mtatrans_distributed |
+| cklogs.provider | kibana（可选 kibana 或 logbot，其他取值启动失败） |
 | cklogs.timeoutMs | 60000 |
 | cklogs.queue.maxConcurrency / size / waitTimeoutMs | 2 / 32 / 30000 |
+| cklogs.logbot.baseUrl | https://logbot.icoremail.net |
+| cklogs.logbot.pollIntervalMs / timeoutMs | 500 / 90000 |
+
+#### cklogs.provider：日志后端选择
+
+`provider=kibana`（默认）走现有 Kibana console proxy，需要 `cklogs.auth`（basic）。`provider=logbot` 切换到 LogBot 异步任务 API，需要 `cklogs.logbot.auth`：`type=login`（username+password 表单登录换 cookie，进程内缓存，401/重定向时自动重登一次）或 `type=bearer`（管理员发放的服务令牌，备选分支）。切换只需改配置并重启；改回 `kibana` 再重启即回滚。调用方 HTTP 路径、请求字段、响应结构、token 权限与共享队列行为不变。
+
+`provider=logbot` 但未配置 `cklogs.logbot.auth` 时不阻塞启动：`/ready` 返回非 200，cklogs 请求返回 `not_available`，且不发出上游请求。`provider=kibana` 且启用 cklogs 时缺 `cklogs.auth` 仍启动失败（既有行为）。LogBot 的账号、密码、cookie、令牌只存于宿主 `config.json`，不进入日志、审计或响应。
+
+LogBot 部署需要容器能解析 `logbot.icoremail.net`（内网 172.16.1.10）：本仓 docker-compose.yml 已带 `extra_hosts` 映射，未切换 provider 时该映射不影响任何行为。
 
 只有缺失使用默认值。未知/重复键、typed null、错误类型、非法 CIDR、监听地址和超过 1 MiB 的文件拒绝。CKLogs 超时为正整数毫秒：timeoutMs 最大 9223372031854（HTTP 客户端额外加 5 秒），waitTimeoutMs 最大 9223372036854。队列 size 可为 0；并发必须 >= 1。createDefaults 保留既有数字保真限制，接受的数字以 json.Number 保存而不转为 float64。
 

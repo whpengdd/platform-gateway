@@ -27,17 +27,20 @@ type Config struct {
 	Audit          *auditlog.Writer
 	CKUser         string
 	CKPass         string
-	Now            func() time.Time
+	// CKReady 按所选 cklogs provider 报告凭据是否就绪；为 nil 时回退到 CKUser/CKPass 判定。
+	CKReady func() bool
+	Now     func() time.Time
 }
 
 type Server struct {
-	auth   *auth.Checker
-	ck     *cklogs.Service
-	gate   backend.Gate
-	audit  *auditlog.Writer
-	ckUser string
-	ckPass string
-	now    func() time.Time
+	auth    *auth.Checker
+	ck      *cklogs.Service
+	gate    backend.Gate
+	audit   *auditlog.Writer
+	ckUser  string
+	ckPass  string
+	ckReady func() bool
+	now     func() time.Time
 }
 
 func New(cfg Config) http.Handler {
@@ -46,13 +49,14 @@ func New(cfg Config) http.Handler {
 		now = time.Now
 	}
 	s := &Server{
-		auth:   cfg.Auth,
-		ck:     cfg.CK,
-		gate:   cfg.Gate,
-		audit:  cfg.Audit,
-		ckUser: cfg.CKUser,
-		ckPass: cfg.CKPass,
-		now:    now,
+		auth:    cfg.Auth,
+		ck:      cfg.CK,
+		gate:    cfg.Gate,
+		audit:   cfg.Audit,
+		ckUser:  cfg.CKUser,
+		ckPass:  cfg.CKPass,
+		ckReady: cfg.CKReady,
+		now:     now,
 	}
 	mux := http.NewServeMux()
 	mux.Handle("/v1/jira/customer-lookup", customerLookup(cfg.Auth, cfg.CustomerLookup))
@@ -98,7 +102,11 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 	echoRID(w, r)
-	if s.auth != nil && s.auth.Ready() && (!s.auth.HasCKLogs() || (s.ckUser != "" && s.ckPass != "")) {
+	ckConfigured := s.ckUser != "" && s.ckPass != ""
+	if s.ckReady != nil {
+		ckConfigured = s.ckReady()
+	}
+	if s.auth != nil && s.auth.Ready() && (!s.auth.HasCKLogs() || ckConfigured) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 		return
 	}

@@ -11,6 +11,9 @@ type Filters struct {
 	Sender    string
 	Recipient string
 	Domain    string
+	// Direction 仅被 LogBot 后端用于决定域名条件落在 from_addr 还是 to_addr；
+	// Kibana 后端忽略它（域名用 sender/rcpt 双侧 match_phrase）。
+	Direction string
 	Subject   string
 	MsgID     string
 	Tid       string
@@ -40,6 +43,11 @@ type QueryResult struct {
 	Total         int
 	ErrorKind     string
 	Message       string
+	// 以下字段由 LogBot 后端按来源状态（limit/partial/failed/expired/skipped_future）
+	// 填写，用于诚实上报不完整结果；Kibana 后端从不设置，行为不变。
+	Truncated   bool     // 来源达到展示上限，条目只是前 N 条
+	Partial     bool     // 来源仍有时段未扫描完成
+	Limitations []string // 需要透传给调用方的不完整说明
 }
 
 type TraceResult struct {

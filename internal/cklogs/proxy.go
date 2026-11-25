@@ -3,41 +3,44 @@ package cklogs
 import "context"
 
 func (s *Service) queryProxy(ctx context.Context, filters Filters, derived derivedQuery, page, pageSize int) DeliveryResult {
-	countRes := s.Client.Query(ctx, filters, QueryOptions{Dataset: "delivery_proxy", CountOnly: true, Stage: "proxy_exact_count"})
+	maxRows := s.backend().MaxDetailRows()
+	countRes := s.backend().Query(ctx, filters, QueryOptions{Dataset: "delivery_proxy", CountOnly: true, Stage: "proxy_exact_count"})
 	if !countRes.OK {
 		return proxyFailure(countRes)
 	}
-	if !countRes.TotalExact {
+	incomplete := !countRes.TotalExact
+	tolerated := incomplete && (countRes.Truncated || countRes.Partial)
+	if incomplete && !tolerated {
 		return deliveryError("CK_LOGS_PROXY_TRUNCATED", "PROXY 总数不精确，无法确认完整性；"+narrowQueryAdvice, nil)
 	}
-	if countRes.Total > HardSize {
+	if !tolerated && countRes.Total > maxRows {
 		return DeliveryResult{
 			Status:      "error",
 			Provider:    "log_platform",
 			Code:        "CK_LOGS_PROXY_TRUNCATED",
 			Total:       ptrInt(countRes.Total),
 			Entries:     []Entry{},
-			Limitations: []string{"PROXY 原始日志命中 " + itoa(countRes.Total) + " 条，超过平台最多返回 " + itoa(HardSize) + " 条的上限，无法完成全量聚合与准确分页；本次不返回不完整结果。" + narrowQueryAdvice},
+			Limitations: []string{"PROXY 原始日志命中 " + itoa(countRes.Total) + " 条，超过平台最多返回 " + itoa(maxRows) + " 条的上限，无法完成全量聚合与准确分页；本次不返回不完整结果。" + narrowQueryAdvice},
 			Truncated:   ptrBool(true),
 			CountOnly:   ptrBool(false),
 			HasMore:     ptrBool(false),
 		}
 	}
 
-	if countRes.Total == 0 && derived.Recipient != "" && derived.Sender != derived.Recipient {
+	if countRes.Total == 0 && !tolerated && derived.Recipient != "" && derived.Sender != derived.Recipient {
 		// A term miss may hide a compound `to` value. Without a verified
 		// complete token predicate, no account-scoped fallback is available.
 		return recipientCoverageUnresolved("PROXY", "CK_LOGS_PROXY_RECIPIENT_FALLBACK_UNRESOLVED")
 	}
-	if countRes.Total == 0 {
-		return proxyPageResult(nil, page, pageSize, nil)
+	if countRes.Total == 0 && !tolerated {
+		return proxyPageResult(nil, page, pageSize, countRes.Limitations)
 	}
 
-	details := s.Client.Query(ctx, filters, QueryOptions{Dataset: "delivery_proxy", PageSize: HardSize, Stage: "proxy_exact_detail"})
+	details := s.backend().Query(ctx, filters, QueryOptions{Dataset: "delivery_proxy", PageSize: maxRows, Stage: "proxy_exact_detail"})
 	if !details.OK {
 		return proxyFailure(details)
 	}
-	if !details.TotalExact || countRes.Total != details.Total || details.Total != len(details.Entries) {
+	if !tolerated && (!details.TotalExact || countRes.Total != details.Total || details.Total != len(details.Entries)) {
 		return DeliveryResult{
 			Status:      "error",
 			Provider:    "log_platform",
@@ -56,8 +59,12 @@ func (s *Service) queryProxy(ctx context.Context, filters Filters, derived deriv
 			matched = append(matched, entry)
 		}
 	}
-	limitations := []string{}
-	return proxyPageResult(aggregateProxyRows(matched), page, pageSize, limitations)
+	limitations := mergeLimitations(countRes.Limitations, details.Limitations)
+	out := proxyPageResult(aggregateProxyRows(matched), page, pageSize, limitations)
+	if countRes.Truncated || details.Truncated {
+		out.Truncated = ptrBool(true)
+	}
+	return out
 }
 
 func proxyPageResult(rows []Entry, page, pageSize int, limitations []string) DeliveryResult {
@@ -94,6 +101,9 @@ func proxyPageResult(rows []Entry, page, pageSize int, limitations []string) Del
 }
 
 func proxyFailure(res QueryResult) DeliveryResult {
+	if res.ErrorKind == "not_available" {
+		return backendUnavailableDelivery(res.Message)
+	}
 	msg := "PROXY 日志查询失败：" + res.Message
 	if res.ErrorKind == "timeout" {
 		msg = timeoutMessage()

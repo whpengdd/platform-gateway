@@ -31,6 +31,7 @@ type Record struct {
 	InFlight         int            `json:"in_flight,omitempty"`
 	QueueDepth       int            `json:"queue_depth,omitempty"`
 	KibanaCalls      []KibanaCall   `json:"kibana_calls"`
+	LogBotCalls      []LogBotCall   `json:"logbot_calls"`
 	HTTPStatus       int            `json:"http_status"`
 	ResultStatus     string         `json:"result_status,omitempty"`
 	ResultCode       string         `json:"result_code,omitempty"`
@@ -57,6 +58,22 @@ type KibanaCall struct {
 	Total      int    `json:"total,omitempty"`
 	Entries    int    `json:"entries,omitempty"`
 }
+
+// LogBotCall 记录一次 LogBot HTTP 调用（登录/提交任务/轮询）。
+// 绝不包含账号、密码、cookie 或日志行正文。
+type LogBotCall struct {
+	Stage        string `json:"stage"` // login | submit | poll
+	Sources      string `json:"sources,omitempty"`
+	HTTPStatus   int    `json:"http_status,omitempty"`
+	DurationMS   int64  `json:"duration_ms"`
+	JobID        string `json:"job_id,omitempty"`
+	SourceStatus string `json:"source_status,omitempty"` // 如 "DA=complete,MTA=limit"
+	ErrorKind    string `json:"error_kind,omitempty"`
+	OK           bool   `json:"ok"`
+}
+
+// maxLogBotCalls 防止长轮询把审计记录撑大；超出后只保留尾部状态。
+const maxLogBotCalls = 32
 
 func NewRecord(r *http.Request, now time.Time, loc *time.Location) *Record {
 	if loc == nil {
@@ -131,6 +148,20 @@ func (rec *Record) AddKibana(call KibanaCall) {
 	rec.mu.Unlock()
 }
 
+func (rec *Record) AddLogBot(call LogBotCall) {
+	if rec == nil {
+		return
+	}
+	rec.mu.Lock()
+	if len(rec.LogBotCalls) >= maxLogBotCalls {
+		// 保留最后一条（终态）之外的最早记录，避免长轮询刷屏。
+		rec.LogBotCalls = append(rec.LogBotCalls[:maxLogBotCalls-1], call)
+	} else {
+		rec.LogBotCalls = append(rec.LogBotCalls, call)
+	}
+	rec.mu.Unlock()
+}
+
 func (rec *Record) SetHTTPStatus(status int) {
 	if rec == nil {
 		return
@@ -179,6 +210,9 @@ func (rec *Record) Marshal() []byte {
 	defer rec.mu.Unlock()
 	if rec.KibanaCalls == nil {
 		rec.KibanaCalls = []KibanaCall{}
+	}
+	if rec.LogBotCalls == nil {
+		rec.LogBotCalls = []LogBotCall{}
 	}
 	b, err := json.Marshal(rec)
 	if err != nil {

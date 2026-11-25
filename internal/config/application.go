@@ -30,10 +30,22 @@ type Jira struct {
 }
 type CKLogs struct {
 	BaseURL   string        `json:"baseUrl"`
+	Provider  string        `json:"provider"`
 	Auth      *UpstreamAuth `json:"auth"`
 	Index     string        `json:"index"`
 	TimeoutMS int64         `json:"timeoutMs"`
 	Queue     Queue         `json:"queue"`
+	LogBot    *LogBot       `json:"logbot,omitempty"`
+}
+
+// LogBot 是 cklogs.provider=logbot 时的后端配置。
+// auth.type=login（username+password 表单登录换 cookie，实测可用）；
+// auth.type=bearer（管理员发放的服务令牌）保留为备选。
+type LogBot struct {
+	BaseURL        string        `json:"baseUrl"`
+	Auth           *UpstreamAuth `json:"auth,omitempty"`
+	PollIntervalMS int64         `json:"pollIntervalMs"`
+	TimeoutMS      int64         `json:"timeoutMs"`
 }
 type Queue struct {
 	MaxConcurrency int   `json:"maxConcurrency"`
@@ -53,7 +65,7 @@ const MaxTimeoutMS = int64((1<<63 - 1 - 5*time.Second) / time.Millisecond)
 const MaxWaitTimeoutMS = int64((1<<63 - 1) / time.Millisecond)
 
 func defaults() File {
-	return File{Server: Server{ListenAddr: ":8091", AllowCIDRs: []string{}}, Audit: Audit{Enabled: true, Dir: "logs"}, CKLogs: CKLogs{BaseURL: "https://ck-logs.icoremail.net", Index: "mtatrans_distributed", TimeoutMS: 60000, Queue: Queue{MaxConcurrency: 2, Size: 32, WaitTimeoutMS: 30000}}}
+	return File{Server: Server{ListenAddr: ":8091", AllowCIDRs: []string{}}, Audit: Audit{Enabled: true, Dir: "logs"}, CKLogs: CKLogs{BaseURL: "https://ck-logs.icoremail.net", Provider: "kibana", Index: "mtatrans_distributed", TimeoutMS: 60000, Queue: Queue{MaxConcurrency: 2, Size: 32, WaitTimeoutMS: 30000}}}
 }
 
 func validURL(raw string, jira bool) bool {
@@ -117,6 +129,50 @@ func validateAuth(a *UpstreamAuth, raw map[string]json.RawMessage, path string, 
 	}
 	return nil
 }
+
+// validateLogBotAuth 校验 cklogs.logbot.auth：login（表单登录）或 bearer（服务令牌）。
+// 令牌拒绝占位符与空白；错误信息不 echo 任何凭据取值。
+func validateLogBotAuth(a *UpstreamAuth, raw map[string]json.RawMessage, path string) error {
+	if a == nil {
+		return nil
+	}
+	for _, field := range []struct{ name, value string }{{"token", a.Token}, {"username", a.Username}, {"password", a.Password}} {
+		if strings.ContainsAny(field.value, "\r\n") {
+			return invalid(path+"."+field.name, "must not contain CR or LF")
+		}
+	}
+	_, token := raw["token"]
+	_, user := raw["username"]
+	_, pass := raw["password"]
+	switch a.Type {
+	case "login":
+		if token {
+			return invalid(path, "login authentication must not include token")
+		}
+		if a.Username == "" {
+			return invalid(path+".username", "required for login authentication")
+		}
+		if a.Password == "" {
+			return invalid(path+".password", "required for login authentication")
+		}
+	case "bearer":
+		if user || pass {
+			return invalid(path, "bearer authentication must not include username or password")
+		}
+		if a.Token == "" {
+			return invalid(path+".token", "required for bearer authentication")
+		}
+		t := strings.TrimSpace(a.Token)
+		lower := strings.ToLower(t)
+		if t != a.Token || strings.Contains(lower, "replace") || strings.Contains(lower, "changeme") || strings.Contains(lower, "change-me") || strings.Contains(lower, "your-token") || strings.Contains(lower, "placeholder") {
+			return invalid(path+".token", "must contain no surrounding whitespace and not be a placeholder")
+		}
+	default:
+		return invalid(path+".type", "must be login or bearer")
+	}
+	return nil
+}
+
 func (f *File) validateApplication(b []byte) error {
 	var raw struct {
 		Jira struct {
@@ -126,7 +182,10 @@ func (f *File) validateApplication(b []byte) error {
 			MaxFieldBytes          *int64                     `json:"maxFieldBytes"`
 		} `json:"jira"`
 		CKLogs struct {
-			Auth map[string]json.RawMessage `json:"auth"`
+			Auth   map[string]json.RawMessage `json:"auth"`
+			LogBot struct {
+				Auth map[string]json.RawMessage `json:"auth"`
+			} `json:"logbot"`
 		} `json:"cklogs"`
 	}
 	if json.Unmarshal(b, &raw) != nil {
@@ -177,11 +236,44 @@ func (f *File) validateApplication(b []byte) error {
 	if c.Index == "" {
 		return invalid("cklogs.index", "must not be empty")
 	}
+	provider := c.Provider
+	if provider != "kibana" && provider != "logbot" {
+		return invalid("cklogs.provider", "must be kibana or logbot")
+	}
+	if provider == "logbot" && c.LogBot == nil {
+		// 允许只切 provider 不填账号：/ready 报 not_ready，请求返回 not_available。
+		c.LogBot = &LogBot{}
+		f.CKLogs.LogBot = c.LogBot
+	}
+	if lb := c.LogBot; lb != nil {
+		if lb.BaseURL == "" {
+			lb.BaseURL = "https://logbot.icoremail.net"
+		}
+		if !validURL(lb.BaseURL, false) {
+			return invalid("cklogs.logbot.baseUrl", "must be an absolute HTTP or HTTPS URL with a valid host and port, without userinfo, query or fragment")
+		}
+		lb.BaseURL = strings.TrimRight(lb.BaseURL, "/")
+		if lb.PollIntervalMS == 0 {
+			lb.PollIntervalMS = 500
+		}
+		if lb.PollIntervalMS < 100 || lb.PollIntervalMS > 60000 {
+			return invalid("cklogs.logbot.pollIntervalMs", "must be between 100 and 60000 milliseconds")
+		}
+		if lb.TimeoutMS == 0 {
+			lb.TimeoutMS = 90000
+		}
+		if lb.TimeoutMS < 1 || lb.TimeoutMS > MaxTimeoutMS {
+			return invalid("cklogs.logbot.timeoutMs", fmt.Sprintf("must be between 1 and %d milliseconds", MaxTimeoutMS))
+		}
+		if err := validateLogBotAuth(lb.Auth, raw.CKLogs.LogBot.Auth, "cklogs.logbot.auth"); err != nil {
+			return err
+		}
+	}
 	if err := validateAuth(c.Auth, raw.CKLogs.Auth, "cklogs.auth", false); err != nil {
 		return err
 	}
-	if f.Enabled("cklogs") && c.Auth == nil {
-		return invalid("cklogs.auth", "required when a cklogs token is configured")
+	if f.Enabled("cklogs") && provider == "kibana" && c.Auth == nil {
+		return invalid("cklogs.auth", "required when a cklogs token is configured and cklogs.provider is kibana")
 	}
 	if c.TimeoutMS < 1 || c.TimeoutMS > MaxTimeoutMS {
 		return invalid("cklogs.timeoutMs", fmt.Sprintf("must be between 1 and %d milliseconds", MaxTimeoutMS))

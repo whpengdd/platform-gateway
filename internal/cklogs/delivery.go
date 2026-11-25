@@ -12,8 +12,8 @@ func isOutboundSentFolderCopy(entry Entry, direction string) bool {
 }
 
 func (s *Service) QuerySelfServiceDelivery(ctx context.Context, in DeliveryQuery) DeliveryResult {
-	if s == nil || s.Client == nil || !s.Client.Configured() {
-		return notConfiguredDelivery()
+	if !s.configured() {
+		return notConfiguredDeliveryFor(s.backendName())
 	}
 	derived := deriveQuery(in)
 	page := in.Page
@@ -28,21 +28,26 @@ func (s *Service) QuerySelfServiceDelivery(ctx context.Context, in DeliveryQuery
 		pageSize = HardSize
 	}
 	if in.CountOnly {
-		da := s.Client.Query(ctx, Filters{
+		countLim := []string{}
+		da := s.backend().Query(ctx, Filters{
 			Sender:    derived.Sender,
 			Recipient: derived.Recipient,
 			TimeRange: in.TimeRange,
 		}, QueryOptions{Dataset: "delivery_agent", CountOnly: true, Stage: "da_count"})
 		if !da.OK {
+			if da.ErrorKind == "not_available" {
+				return backendUnavailableDelivery(da.Message)
+			}
 			msg := "DATRANS 查询失败：" + da.Message
 			if da.ErrorKind == "timeout" {
 				msg = timeoutMessage()
 			}
 			return deliveryError(ckLogsCode(da.ErrorKind), msg, nil)
 		}
+		countLim = append(countLim, da.Limitations...)
 		total := da.Total
 		if total == 0 {
-			mta := s.Client.Query(ctx, Filters{
+			mta := s.backend().Query(ctx, Filters{
 				Sender:    derived.Sender,
 				Recipient: derived.Recipient,
 				TimeRange: in.TimeRange,
@@ -50,10 +55,11 @@ func (s *Service) QuerySelfServiceDelivery(ctx context.Context, in DeliveryQuery
 			if !mta.OK {
 				return mtaFailure(mta)
 			}
+			countLim = append(countLim, mta.Limitations...)
 			total = mta.Total
 		}
 		if total == 0 && in.Direction == "inbound" {
-			proxy := s.Client.Query(ctx, Filters{
+			proxy := s.backend().Query(ctx, Filters{
 				Sender:    derived.Sender,
 				Recipient: derived.Recipient,
 				TimeRange: in.TimeRange,
@@ -61,14 +67,16 @@ func (s *Service) QuerySelfServiceDelivery(ctx context.Context, in DeliveryQuery
 			if !proxy.OK {
 				return proxyFailure(proxy)
 			}
+			countLim = append(countLim, proxy.Limitations...)
 			total = proxy.Total
 		}
+		lim := append([]string{"本次为计数查询（countOnly），只返回命中总数、不含明细。"}, countLim...)
 		return DeliveryResult{
 			Status:      "ok",
 			Provider:    "log_platform",
 			Total:       ptrInt(total),
 			Entries:     []Entry{},
-			Limitations: []string{"本次为计数查询（countOnly），只返回命中总数、不含明细。"},
+			Limitations: lim,
 			CountOnly:   ptrBool(true),
 			Page:        page,
 			PageSize:    pageSize,
@@ -80,6 +88,9 @@ func (s *Service) QuerySelfServiceDelivery(ctx context.Context, in DeliveryQuery
 		Sender: derived.Sender, Recipient: derived.Recipient, TimeRange: in.TimeRange,
 	})
 	if !da.OK {
+		if da.ErrorKind == "not_available" {
+			return backendUnavailableDelivery(da.Message)
+		}
 		msg := "DATRANS 查询失败：" + da.Message
 		if da.ErrorKind == "timeout" {
 			msg = timeoutMessage()
@@ -102,13 +113,21 @@ func (s *Service) QuerySelfServiceDelivery(ctx context.Context, in DeliveryQuery
 			matching = append(matching, entry)
 		}
 	}
-	var withTid []Entry
-	for _, entry := range matching {
-		if strings.TrimSpace(entry.Tid) != "" {
-			withTid = append(withTid, entry)
+	// Kibana 的 DA 行带 tid，按 tid 分组聚合同一封邮件的多条命令行；
+	// LogBot 的行没有 tid，本地聚合改为逐行（行已按 cmd=local/remote 过滤去重），
+	// 分组键退化为 message-id/记录序号，语义与 aggregatePeerRows 的 tid 空值回退一致。
+	var daRows []Entry
+	if s.backendName() == "logbot" {
+		daRows = aggregatePeerRows(matching, in.Direction, "da")
+	} else {
+		var withTid []Entry
+		for _, entry := range matching {
+			if strings.TrimSpace(entry.Tid) != "" {
+				withTid = append(withTid, entry)
+			}
 		}
+		daRows = aggregatePeerRows(withTid, in.Direction, "da")
 	}
-	daRows := aggregatePeerRows(withTid, in.Direction, "da")
 	if len(daRows) == 0 {
 		mtaFilters := Filters{
 			Sender:    derived.Sender,
@@ -130,6 +149,14 @@ func (s *Service) QuerySelfServiceDelivery(ctx context.Context, in DeliveryQuery
 		mtaRows := aggregatePeerRows(matchedMTA, in.Direction, "mta")
 		lim := append([]string{}, mta.Limitations...)
 		lim = append(lim, "DATRANS 聚合后零命中，已使用相同发件人、收件人、主题和时间条件回查 MTA。")
+		if s.backendName() == "logbot" {
+			for _, r := range mtaRows {
+				if r.DeliveryStatus == "unknown" {
+					lim = append(lim, "LogBot 的 MTA 行不包含投递结果与对端响应，deliveryStatus=unknown 的记录无法判读投递结果与失败原因，需要人工核查。")
+					break
+				}
+			}
+		}
 		if in.Direction == "inbound" && len(mtaRows) == 0 {
 			proxy := s.queryProxy(ctx, Filters{
 				Sender:    derived.Sender,
@@ -148,7 +175,11 @@ func (s *Service) QuerySelfServiceDelivery(ctx context.Context, in DeliveryQuery
 			}
 			return proxy
 		}
-		return proxyPageResult(mtaRows, page, pageSize, lim)
+		out := proxyPageResult(mtaRows, page, pageSize, lim)
+		if mta.Truncated != nil {
+			out.Truncated = mta.Truncated
+		}
+		return out
 	}
 
 	type group struct {
@@ -197,7 +228,21 @@ func (s *Service) QuerySelfServiceDelivery(ctx context.Context, in DeliveryQuery
 
 	// 串行 tid 回查没有上限会把并发槽占到 N*超时；截断或超时后未回查的行保持 unknown，并写 limitation。
 	const maxUnknownTidLookups = 8
-	lim := []string{}
+	lim := append([]string{}, da.Limitations...)
+	if s.backendName() == "logbot" {
+		for _, e := range matching {
+			if strings.TrimSpace(e.Tid) == "" && strings.TrimSpace(e.Mid) == "" && strings.TrimSpace(e.MessageID) == "" {
+				lim = append(lim, "LogBot 的 DA 行没有 tid，部分行也缺 message-id：同一封邮件的 local/remote 命令行可能无法合并，列表可能按命令行分行显示，条数不代表邮件封数。")
+				break
+			}
+		}
+		for _, g := range groups {
+			if g.row.DeliveryStatus == "unknown" && isDeliveryAgentMainAction(g.row) {
+				lim = append(lim, "LogBot 不提供 tid 列，无法按 tid 回查 MTA 补判状态；deliveryStatus=unknown 的记录保持未知，不能据此断定投递结果。")
+				break
+			}
+		}
+	}
 	if da.Total > HardSize {
 		lim = append(lim, "DATRANS 已在计数后单页全量取回；上游未提供快照，查询期间的迟到或变更日志可能影响计数与明细的一致性。")
 	}
@@ -285,7 +330,7 @@ func (s *Service) QuerySelfServiceDelivery(ctx context.Context, in DeliveryQuery
 		Total:       ptrInt(len(rows)),
 		Entries:     slice,
 		Limitations: lim,
-		Truncated:   ptrBool(false),
+		Truncated:   ptrBool(da.Truncated),
 		CountOnly:   ptrBool(false),
 		Page:        page,
 		PageSize:    pageSize,

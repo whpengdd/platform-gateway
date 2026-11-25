@@ -18,6 +18,19 @@ func (s *Service) QueryAccountLog(ctx context.Context, in AccountQuery) AccountR
 			Limitations: []string{"未知 dataset「" + in.Dataset + "」，未执行任何查询（不会回落到其它日志表）。"},
 		}
 	}
+	if s.backendName() == "logbot" {
+		// LogBot 实测只提供 DA/MTA/PROXYSVR 收发信来源；pop3/webmail/smtp 登录与
+		// webmail/pop3 操作日志返回 403「暂停提供查询」，明确 not_available，不冒充无记录。
+		return AccountResult{
+			Status:      "not_available",
+			Provider:    "log_platform",
+			Dataset:     ds.Key,
+			Protocol:    ds.Protocol,
+			Entries:     []AuthEntry{},
+			Limitations: []string{"当前日志后端（LogBot）未提供「" + ds.Key + "」对应的登录/操作日志来源（该日志类型在 LogBot 暂不支持查询），未执行任何查询。注意：这不等于「没有记录」，不得据此答复客户；SMTP 登录只能查 MTA 的 AUTH 行，LogBot 不支持按账号过滤。"},
+			CountOnly:   ptrBool(in.CountOnly),
+		}
+	}
 	if ds.Unavailable != "" {
 		return AccountResult{
 			Status:      "not_available",
@@ -28,13 +41,13 @@ func (s *Service) QueryAccountLog(ctx context.Context, in AccountQuery) AccountR
 			Limitations: []string{UnavailableNote(ds.Unavailable)},
 		}
 	}
-	if s == nil || s.Client == nil || !s.Client.Configured() {
+	if !s.configured() {
 		return AccountResult{
 			Status:      "not_available",
 			Provider:    "none",
 			Dataset:     ds.Key,
 			Entries:     []AuthEntry{},
-			Limitations: []string{"日志平台凭据未配置（CK_LOGS_BASIC_USER/CK_LOGS_BASIC_PASS），未执行任何查询。"},
+			Limitations: []string{notConfiguredMessage(s.backendName())},
 		}
 	}
 	account := ExtractAddr(in.Account)
@@ -55,7 +68,7 @@ func (s *Service) QueryAccountLog(ctx context.Context, in AccountQuery) AccountR
 	}
 	failure := func(r QueryResult) AccountResult {
 		status := "error"
-		if r.ErrorKind == "imap_table_missing" {
+		if r.ErrorKind == "imap_table_missing" || r.ErrorKind == "not_available" {
 			status = "not_available"
 		}
 		return AccountResult{
@@ -70,7 +83,7 @@ func (s *Service) QueryAccountLog(ctx context.Context, in AccountQuery) AccountR
 	}
 
 	if !in.CountOnly {
-		countRes, _ := s.Client.QueryAuth(ctx, filters, QueryOptions{Dataset: ds.Key, CountOnly: true})
+		countRes, _ := s.backend().QueryAuth(ctx, filters, QueryOptions{Dataset: ds.Key, CountOnly: true})
 		if !countRes.OK {
 			return failure(countRes)
 		}
@@ -86,7 +99,7 @@ func (s *Service) QueryAccountLog(ctx context.Context, in AccountQuery) AccountR
 				CountOnly:   ptrBool(false),
 			}
 		}
-		res, entries := s.Client.QueryAuth(ctx, filters, QueryOptions{Dataset: ds.Key})
+		res, entries := s.backend().QueryAuth(ctx, filters, QueryOptions{Dataset: ds.Key})
 		if !res.OK {
 			return AccountResult{
 				Status:   "ok",
@@ -139,7 +152,7 @@ func (s *Service) QueryAccountLog(ctx context.Context, in AccountQuery) AccountR
 		}
 	}
 
-	res, entries := s.Client.QueryAuth(ctx, filters, QueryOptions{Dataset: ds.Key, CountOnly: true})
+	res, entries := s.backend().QueryAuth(ctx, filters, QueryOptions{Dataset: ds.Key, CountOnly: true})
 	if !res.OK {
 		return failure(res)
 	}

@@ -21,30 +21,37 @@ func (s *Service) queryDeliveryAgentPages(ctx context.Context, filters Filters) 
 		}
 		return QueryResult{ErrorKind: kind, Message: ctx.Err().Error()}, ""
 	}
-	count := s.Client.Query(ctx, filters, QueryOptions{Dataset: "delivery_agent", CountOnly: true, Stage: "da_count"})
+	count := s.backend().Query(ctx, filters, QueryOptions{Dataset: "delivery_agent", CountOnly: true, Stage: "da_count"})
 	if !count.OK {
 		return count, ""
 	}
 	fail := func(message string) (QueryResult, string) { count.Entries = nil; return count, message }
 	if !count.TotalExact {
-		return fail("DATRANS 总数不精确，无法确认完整性")
+		// Kibana 的不精确计数无法确认完整性，整体报错；LogBot 的 limit/partial
+		// 来源状态带有已加载行，按 spec 返回这些数据并附 limitations（不冒充完整）。
+		if !count.Truncated && !count.Partial {
+			return fail("DATRANS 总数不精确，无法确认完整性")
+		}
 	}
-	if count.Total > maxDeliveryAgentEntries {
+	if count.TotalExact && count.Total > maxDeliveryAgentEntries {
 		return fail("DATRANS 原始日志超过全量护栏（" + itoa(maxDeliveryAgentEntries) + " 条）")
 	}
-	if count.Total == 0 {
+	if count.Total == 0 && !count.Truncated && !count.Partial {
 		count.Entries = []Entry{}
 		return count, ""
 	}
-	detail := s.Client.Query(ctx, filters, QueryOptions{Dataset: "delivery_agent", PageSize: count.Total, Stage: "da_full", FullSize: true})
+	detail := s.backend().Query(ctx, filters, QueryOptions{Dataset: "delivery_agent", PageSize: count.Total, Stage: "da_full", FullSize: true})
 	if !detail.OK {
 		return detail, ""
 	}
-	if !detail.TotalExact || detail.Total != count.Total {
+	if count.TotalExact && (!detail.TotalExact || detail.Total != count.Total) {
 		return fail("DATRANS 计数与明细总数不一致")
 	}
-	if len(detail.Entries) != count.Total {
+	if len(detail.Entries) != count.Total && count.TotalExact {
 		return fail("DATRANS 全量取回返回条数不足或异常")
 	}
+	detail.Truncated = detail.Truncated || count.Truncated
+	detail.Partial = detail.Partial || count.Partial
+	detail.Limitations = mergeLimitations(count.Limitations, detail.Limitations)
 	return detail, ""
 }

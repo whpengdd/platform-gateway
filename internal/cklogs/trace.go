@@ -17,11 +17,18 @@ func (s *Service) TraceByTid(ctx context.Context, in MessageQuery) MessageResult
 	if tid == "" {
 		return emptyMsg("not_available", "none", "", []string{"缺少事务号 tid，跨表追踪无法关联（tid 应取自 query_delivery_log 返回的 entries[].tid），未执行查询。"})
 	}
-	if s == nil || s.Client == nil || !s.Client.Configured() {
-		return emptyMsg("not_available", "none", "", []string{"日志平台凭据未配置（CK_LOGS_BASIC_USER/CK_LOGS_BASIC_PASS），未执行任何查询。"})
+	if s.backendName() == "logbot" {
+		// LogBot 实测没有 tid 列，也不支持按 tid 筛选，无法串联投递轨迹。
+		return emptyMsg("not_available", "log_platform", "", []string{"当前日志后端（LogBot）不提供 tid 列，也不支持按 tid 筛选，按 tid 串联投递轨迹（/v1/cklogs/message）不可用，未执行任何查询。注意：这不等于「没有记录」；可按发件人/收件人/时间窗改用 delivery 查询。"})
 	}
-	res := s.Client.Trace(ctx, tid, in.TimeRange)
+	if !s.configured() {
+		return emptyMsg("not_available", "none", "", []string{notConfiguredMessage(s.backendName())})
+	}
+	res := s.backend().Trace(ctx, tid, in.TimeRange)
 	if !res.OK {
+		if res.ErrorKind == "not_available" {
+			return emptyMsg("not_available", "log_platform", "", []string{res.Message})
+		}
 		return emptyMsg("error", "log_platform", ckLogsCode(res.ErrorKind), []string{"跨表追踪失败：" + res.Message})
 	}
 	lim := []string{}

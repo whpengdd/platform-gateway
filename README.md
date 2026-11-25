@@ -36,7 +36,7 @@ curl -sf http://127.0.0.1:8091/health
 
 ## Kibana 并发与排队
 
-所有 `/v1/cklogs/*` 接口（包括自助和内部 `analysis/*`）共用一个进程内 FIFO 队列。每个执行中的业务请求占用一个槽，其内部 Kibana HTTP 调用串行执行，因此同时调用 Kibana 的数量不会超过配置上限。
+所有 `/v1/cklogs/*` 接口（包括自助和内部 `analysis/*`）共用一个进程内 FIFO 队列。每个执行中的业务请求占用一个槽，其内部 Kibana HTTP 调用串行执行，因此同时调用 Kibana 的数量不会超过配置上限。日志后端可在 `config.json` 用 `cklogs.provider` 选择 `kibana`（默认）或 `logbot`（LogBot 异步查询 API），切换与回滚只需改配置重启，调用方合同不变；LogBot 的能力缺口（tid 轨迹、登录/操作日志等返回 `not_available`）见 [docs/api.md](docs/api.md)，配置字段见 [docs/gateway-auth.md](docs/gateway-auth.md)。
 
 在 `config.json` 的 `cklogs.queue` 中配置：
 

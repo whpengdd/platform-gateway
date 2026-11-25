@@ -19,4 +19,8 @@ services:
         bind:
           create_host_path: false
       - ${PLATFORM_GATEWAY_LOG_HOST_DIR:-./logs}:/var/log/platform-gateway
+    # cklogs.provider=logbot 时容器内需把 logbot.icoremail.net 解析到内网地址；
+    # 未切换 provider 时该映射不影响任何现有行为。
+    extra_hosts:
+      - "logbot.icoremail.net:172.16.1.10"
     restart: unless-stopped

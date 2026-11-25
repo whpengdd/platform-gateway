@@ -28,16 +28,38 @@ func main() {
 	for _, warning := range cfg.authFile.Warnings() {
 		log.Print(warning)
 	}
-	// All routes share the same Kibana budget, including internal analysis calls.
+	// All routes share the same upstream log budget, including internal analysis calls.
 	gate := queue.New("cklogs", cfg.maxConc, cfg.queueSize, cfg.queueWait)
-	log.Printf("Kibana queue: max_concurrency=%d queue_size=%d wait_timeout=%s", cfg.maxConc, cfg.queueSize, cfg.queueWait)
-	client := &cklogs.Client{
-		BaseURL:    cfg.ckBase,
-		User:       cfg.ckUser,
-		Pass:       cfg.ckPass,
-		Index:      cfg.ckIndex,
-		Timeout:    cfg.ckTimeout,
-		HTTPClient: newHTTPClient(cfg.ckTimeout),
+	var ckService *cklogs.Service
+	var ckReady func() bool
+	if cfg.ckProvider == "logbot" {
+		log.Printf("LogBot queue: max_concurrency=%d queue_size=%d wait_timeout=%s", cfg.maxConc, cfg.queueSize, cfg.queueWait)
+		lb := &cklogs.LogBotClient{
+			BaseURL:      cfg.lbBase,
+			Username:     cfg.lbUser,
+			Password:     cfg.lbPass,
+			Token:        cfg.lbToken,
+			PollInterval: cfg.lbPollInterval,
+			Timeout:      cfg.lbTimeout,
+			// LogBot 未认证时会 302 到 SSO 登录页，必须禁止跟随重定向。
+			HTTPClient: newNoRedirectHTTPClient(cfg.lbTimeout),
+		}
+		ckService = cklogs.NewLogBotService(lb)
+		ckReady = lb.Configured
+		log.Printf("cklogs provider: logbot (base_url configured=%t, auth configured=%t)", cfg.lbBase != "", lb.Configured())
+	} else {
+		log.Printf("Kibana queue: max_concurrency=%d queue_size=%d wait_timeout=%s", cfg.maxConc, cfg.queueSize, cfg.queueWait)
+		client := &cklogs.Client{
+			BaseURL:    cfg.ckBase,
+			User:       cfg.ckUser,
+			Pass:       cfg.ckPass,
+			Index:      cfg.ckIndex,
+			Timeout:    cfg.ckTimeout,
+			HTTPClient: newHTTPClient(cfg.ckTimeout),
+		}
+		ckService = cklogs.NewService(client)
+		user, pass := cfg.ckUser, cfg.ckPass
+		ckReady = func() bool { return user != "" && pass != "" }
 	}
 	audit, err := auditlog.NewWriter(cfg.logDir)
 	if err != nil {
@@ -59,11 +81,12 @@ func main() {
 		Jira:           jiraHandler,
 		CustomerLookup: cfg.authFile.CustomerLookup,
 		Auth:           checker,
-		CK:             cklogs.NewService(client),
+		CK:             ckService,
 		Gate:           gate,
 		Audit:          audit,
 		CKUser:         cfg.ckUser,
 		CKPass:         cfg.ckPass,
+		CKReady:        ckReady,
 	})
 	srv := &http.Server{
 		Addr:              cfg.listen,
@@ -104,20 +127,37 @@ func newHTTPClient(timeout time.Duration) *http.Client {
 	}
 }
 
+// newNoRedirectHTTPClient 与 newHTTPClient 相同，但禁止跟随重定向：
+// LogBot 未认证时会 302 到 SSO 登录页，跟随跳转会把查询条件泄漏给 SSO。
+func newNoRedirectHTTPClient(timeout time.Duration) *http.Client {
+	c := newHTTPClient(timeout)
+	c.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	return c
+}
+
 type config struct {
-	listen     string
-	authFile   *fileconfig.File
-	jiraClient *jira.Client
-	cidrs      []*net.IPNet
-	logDir     string
-	ckBase     string
-	ckUser     string
-	ckPass     string
-	ckIndex    string
-	ckTimeout  time.Duration
-	maxConc    int
-	queueSize  int
-	queueWait  time.Duration
+	listen         string
+	authFile       *fileconfig.File
+	jiraClient     *jira.Client
+	cidrs          []*net.IPNet
+	logDir         string
+	ckProvider     string
+	ckBase         string
+	ckUser         string
+	ckPass         string
+	ckIndex        string
+	ckTimeout      time.Duration
+	lbBase         string
+	lbUser         string
+	lbPass         string
+	lbToken        string
+	lbPollInterval time.Duration
+	lbTimeout      time.Duration
+	maxConc        int
+	queueSize      int
+	queueWait      time.Duration
 }
 
 func loadConfig() (config, error) {
@@ -142,14 +182,31 @@ func loadConfig() (config, error) {
 	if c.Auth != nil {
 		user, pass = c.Auth.Username, c.Auth.Password
 	}
+	var lbBase, lbUser, lbPass, lbToken string
+	var lbPollInterval, lbTimeout time.Duration
+	if c.LogBot != nil {
+		lbBase = c.LogBot.BaseURL
+		lbPollInterval = time.Duration(c.LogBot.PollIntervalMS) * time.Millisecond
+		lbTimeout = time.Duration(c.LogBot.TimeoutMS) * time.Millisecond
+		if c.LogBot.Auth != nil {
+			switch c.LogBot.Auth.Type {
+			case "login":
+				lbUser, lbPass = c.LogBot.Auth.Username, c.LogBot.Auth.Password
+			case "bearer":
+				lbToken = c.LogBot.Auth.Token
+			}
+		}
+	}
 	dir := ""
 	if authFile.Audit.Enabled {
 		dir = authFile.Audit.Dir
 	}
 	return config{
 		listen: authFile.Server.ListenAddr, authFile: authFile, jiraClient: jiraClient,
-		cidrs: cidrs, logDir: dir, ckBase: c.BaseURL, ckUser: user, ckPass: pass,
+		cidrs: cidrs, logDir: dir, ckProvider: c.Provider, ckBase: c.BaseURL, ckUser: user, ckPass: pass,
 		ckIndex: c.Index, ckTimeout: time.Duration(c.TimeoutMS) * time.Millisecond,
+		lbBase: lbBase, lbUser: lbUser, lbPass: lbPass, lbToken: lbToken,
+		lbPollInterval: lbPollInterval, lbTimeout: lbTimeout,
 		maxConc: c.Queue.MaxConcurrency, queueSize: c.Queue.Size,
 		queueWait: time.Duration(c.Queue.WaitTimeoutMS) * time.Millisecond,
 	}, nil
