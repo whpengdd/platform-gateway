@@ -33,6 +33,7 @@
   "jira": {
     "baseUrl": "https://jira.example.com/jira",
     "accountCacheTtlSeconds": 300,
+    "maxFieldBytes": 65536,
     "auth": {
       "type": "bearer",
       "token": "<jira-upstream-token>"

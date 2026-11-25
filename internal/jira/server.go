@@ -46,10 +46,16 @@ type Server struct {
 	digest               string
 	now                  func() time.Time
 	responseWriteTimeout time.Duration
+	maxFieldBytes        int
 }
 
-func NewServer(c *Client, a *auth.Checker, policies map[string]config.Project) (*Server, error) {
-	s := &Server{client: c, auth: a, projects: map[string]*project{}, gate: queue.New("jira", 2, 32, 30*time.Second), now: time.Now, responseWriteTimeout: 30 * time.Second}
+// maxFieldBytes is the jira.maxFieldBytes ceiling for a single text field in
+// either direction; <=0 falls back to the documented default.
+func NewServer(c *Client, a *auth.Checker, policies map[string]config.Project, maxFieldBytes int) (*Server, error) {
+	if maxFieldBytes <= 0 {
+		maxFieldBytes = 65536
+	}
+	s := &Server{client: c, auth: a, projects: map[string]*project{}, gate: queue.New("jira", 2, 32, 30*time.Second), now: time.Now, responseWriteTimeout: 30 * time.Second, maxFieldBytes: maxFieldBytes}
 	if _, err := rand.Read(s.secret[:]); err != nil {
 		return nil, err
 	}
@@ -252,7 +258,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				if e != nil {
 					return e
 				}
-				result, err = projectIssue(issue, key, p.Project, schemas)
+				result, err = projectIssue(issue, key, p.Project, schemas, s.maxFieldBytes)
 			case "comments", "comment":
 				result, err = s.comments(r, key, p, issue, child, write)
 			case "upload":

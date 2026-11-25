@@ -93,10 +93,10 @@ func TestUnknownCreateOperationsDisable(t *testing.T) {
 }
 func TestEnumAndRequiredValidation(t *testing.T) {
 	f := Field{Required: true, Schema: Schema{Type: "option"}, Allowed: []any{map[string]any{"id": "1", "value": "allowed", "self": "hidden"}}}
-	if !validateValue(map[string]any{"id": "1"}, f) || validateValue(map[string]any{"id": "1", "value": "wrong"}, f) {
+	if !validateValue(map[string]any{"id": "1"}, f, 65536) || validateValue(map[string]any{"id": "1", "value": "wrong"}, f, 65536) {
 		t.Fatal("enum validation")
 	}
-	if validateValue(" ", Field{Required: true, Schema: Schema{Type: "string"}}) {
+	if validateValue(" ", Field{Required: true, Schema: Schema{Type: "string"}}, 65536) {
 		t.Fatal("empty required string")
 	}
 }

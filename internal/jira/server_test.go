@@ -24,7 +24,7 @@ func fixture(t *testing.T, h http.HandlerFunc) (*Server, *auth.Checker) {
 		t.Fatal(err)
 	}
 	a := auth.NewFromFile(f, nil)
-	s, err := NewServer(testClient(t, h), a, f.Jira.Projects)
+	s, err := NewServer(testClient(t, h), a, f.Jira.Projects, int(f.Jira.MaxFieldBytes))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -444,6 +444,61 @@ func TestSaturatedJiraDoesNotBlockCKLogs(t *testing.T) {
 	close(release)
 	<-done
 	if w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+}
+func TestFieldByteLimit(t *testing.T) {
+	big := strings.Repeat("x", 40000)
+	s, _ := fixture(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/search") {
+			i := mockIssue()
+			object(i["fields"])["description"] = big
+			json.NewEncoder(w).Encode(map[string]any{"issues": []any{i}, "total": 1, "startAt": 0})
+			return
+		}
+		baseline(w, r)
+	})
+	s.projects["CS"].ReadFields = []string{"summary", "description"}
+	w := call(s, "GET", root+"/issues/CS-1", "jira-a", "")
+	if w.Code != 200 || !strings.Contains(w.Body.String(), big) {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	w = call(s, "GET", root+"/capabilities", "jira-a", "")
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"maxBytes":65536`) {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	s.maxFieldBytes = 32768
+	w = call(s, "GET", root+"/issues/CS-1", "jira-a", "")
+	if w.Code != 503 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	w = call(s, "GET", root+"/capabilities", "jira-a", "")
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"maxBytes":32768`) {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	w = call(s, "POST", root+"/issues", "jira-a", `{"fields":{"summary":"x","description":"`+big+`"}}`)
+	if w.Code != 400 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	w = call(s, "POST", root+"/issues/CS-1/comments", "jira-a", `{"body":"`+big+`"}`)
+	if w.Code != 400 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	s, _ = fixture(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/comment") {
+			io.WriteString(w, `{"startAt":0,"total":1,"comments":[{"id":"11","body":"`+big+`","author":{"name":"bot"}}]}`)
+			return
+		}
+		baseline(w, r)
+	})
+	s.maxFieldBytes = 32768
+	w = call(s, "GET", root+"/issues/CS-1/comments", "jira-a", "")
+	if w.Code != 503 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	s.maxFieldBytes = 65536
+	w = call(s, "GET", root+"/issues/CS-1/comments", "jira-a", "")
+	if w.Code != 200 || !strings.Contains(w.Body.String(), big) {
 		t.Fatal(w.Code, w.Body.String())
 	}
 }

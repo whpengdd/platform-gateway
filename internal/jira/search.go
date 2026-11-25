@@ -152,7 +152,7 @@ func (s *Server) search(r *http.Request, key string, p *project) (any, error) {
 	}
 	items := []any{}
 	for _, i := range result.Issues {
-		item, err := projectIssue(i, key, p.Project, schemas)
+		item, err := projectIssue(i, key, p.Project, schemas, s.maxFieldBytes)
 		if err != nil {
 			return nil, err
 		}

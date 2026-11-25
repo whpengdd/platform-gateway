@@ -50,7 +50,7 @@ func main() {
 	checker := auth.NewFromFile(cfg.authFile, cfg.cidrs)
 	var jiraHandler http.Handler
 	if cfg.jiraClient != nil {
-		jiraHandler, err = jira.NewServer(cfg.jiraClient, checker, cfg.authFile.Jira.Projects)
+		jiraHandler, err = jira.NewServer(cfg.jiraClient, checker, cfg.authFile.Jira.Projects, int(cfg.authFile.Jira.MaxFieldBytes))
 		if err != nil {
 			log.Fatal(err)
 		}

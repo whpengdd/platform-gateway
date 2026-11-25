@@ -71,7 +71,7 @@ func nullable(s string) any {
 	}
 	return s
 }
-func projectValue(v any, s Schema) (any, bool) {
+func projectValue(v any, s Schema, maxBytes int) (any, bool) {
 	if v == nil {
 		return nil, true
 	}
@@ -85,7 +85,7 @@ func projectValue(v any, s Schema) (any, bool) {
 		}
 		out := []any{}
 		for _, item := range a {
-			x, ok := projectValue(item, Schema{Type: s.Items})
+			x, ok := projectValue(item, Schema{Type: s.Items}, maxBytes)
 			if !ok {
 				return nil, false
 			}
@@ -96,7 +96,7 @@ func projectValue(v any, s Schema) (any, bool) {
 	switch s.Type {
 	case "string":
 		v, ok := v.(string)
-		return v, ok && len(v) <= 32768
+		return v, ok && len(v) <= maxBytes
 	case "number":
 		v, ok := v.(float64)
 		return v, ok
@@ -119,7 +119,7 @@ func projectValue(v any, s Schema) (any, bool) {
 		return map[string]any{"id": id, "value": value}, true
 	}
 }
-func validateValue(v any, f Field) bool {
+func validateValue(v any, f Field, maxBytes int) bool {
 	if v == nil {
 		return !f.Required
 	}
@@ -131,14 +131,14 @@ func validateValue(v any, f Field) bool {
 			return false
 		}
 	}
-	if _, ok := projectValue(v, f.Schema); !ok {
+	if _, ok := projectValue(v, f.Schema, maxBytes); !ok {
 		return false
 	}
 	if f.Schema.Type == "array" {
 		for _, x := range v.([]any) {
 			g := f
 			g.Schema.Type = f.Schema.Items
-			if !validateValue(x, g) {
+			if !validateValue(x, g, maxBytes) {
 				return false
 			}
 		}
@@ -287,7 +287,7 @@ func createProof(p config.Project) bool {
 	}
 	return false
 }
-func projectIssue(i Issue, key string, p config.Project, schemas map[string]Schema) (any, error) {
+func projectIssue(i Issue, key string, p config.Project, schemas map[string]Schema, maxBytes int) (any, error) {
 	if str(object(i.Fields["project"])["key"]) != key || !config.NumericID.MatchString(i.ID) || !issueKey.MatchString(i.Key) {
 		return nil, failure(404, "resource_not_available")
 	}
@@ -304,7 +304,7 @@ func projectIssue(i Issue, key string, p config.Project, schemas map[string]Sche
 		switch f {
 		case "summary", "description", "updated":
 			s, ok := v.(string)
-			if !ok || len(s) > 32768 {
+			if !ok || len(s) > maxBytes {
 				return nil, unavailable()
 			}
 			fields[f] = s
@@ -331,7 +331,7 @@ func projectIssue(i Issue, key string, p config.Project, schemas map[string]Sche
 			}
 			fields[f] = out
 		default:
-			x, ok := projectValue(v, schemas[f])
+			x, ok := projectValue(v, schemas[f], maxBytes)
 			if !ok {
 				return nil, unavailable()
 			}

@@ -198,6 +198,7 @@ Bearer 与 Basic 字段不能混用；凭据必须非空且不能含 CR/LF。JSO
 | server.listenAddr / allowCidrs | :8091 / []（不限制来源） |
 | audit.enabled / dir | true / logs |
 | jira.accountCacheTtlSeconds | 300秒；整数0–3600，0禁用已完成账号快照复用 |
+| jira.maxFieldBytes | 65536字节；整数1024–4194304，单个文本字段的 UTF-8 字节上限 |
 | cklogs.baseUrl / index | https://ck-logs.icoremail.net / mtatrans_distributed |
 | cklogs.timeoutMs | 60000 |
 | cklogs.queue.maxConcurrency / size / waitTimeoutMs | 2 / 32 / 30000 |
@@ -205,6 +206,8 @@ Bearer 与 Basic 字段不能混用；凭据必须非空且不能含 CR/LF。JSO
 只有缺失使用默认值。未知/重复键、typed null、错误类型、非法 CIDR、监听地址和超过 1 MiB 的文件拒绝。CKLogs 超时为正整数毫秒：timeoutMs 最大 9223372031854（HTTP 客户端额外加 5 秒），waitTimeoutMs 最大 9223372036854。队列 size 可为 0；并发必须 >= 1。createDefaults 保留既有数字保真限制，接受的数字以 json.Number 保存而不转为 float64。
 
 `jira.accountCacheTtlSeconds` 使用整数秒，省略为300；显式0保留为0。null、字符串、小数、负数、超过3600及重复键均导致启动失败，诊断只输出允许的字段路径及固定原因，不回显输入值。配置改动通过已有重启 / 重建流程生效，无新环境变量或清缓存端点。未启用 Jira 时不会读取账号，也不增加 Jira 启动依赖。
+
+`jira.maxFieldBytes` 是单个文本字段允许的 UTF-8 字节上限，省略为65536，整数范围1024–4194304（不超过上游及下游 JSON 的 4 MiB 响应限额）。同一上限约束：读取投影的 summary/description/updated 及字符串自定义字段、评论正文读取与提交、创建字段中的字符串值；capabilities 公布的字符串字段 maxBytes 与之相同。字段超限的读取返回503 upstream_unavailable，提交返回400 invalid_body；summary 另有独立的1024字节上限，不受影响。
 
 账号最小身份及 `/rest/api/2/myself` 的 timeZone 缓存按 Jira client / 凭据隔离，同一 client 的项目及入站 token 共享；每进程独立、不持久化。首次需要身份或时间转换时按需读取；TTL 从成功取得身份快照完成时起算，过期后按需刷新，没有后台轮询。并发刷新合并为一次读取，TTL=0 也合并在途请求，但不复用已完成快照；0仍保留游标比较所需的上下文历史。此缓存不包括 `/field`、创建元数据、权限或资源归属检查。
 

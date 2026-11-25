@@ -17,11 +17,11 @@ type Comment struct {
 	Visibility any    `json:"visibility"`
 }
 
-func commentProjection(c Comment) (any, error) {
+func commentProjection(c Comment, maxBytes int) (any, error) {
 	if c.Visibility != nil || !config.NumericID.MatchString(c.ID) {
 		return nil, failure(404, "resource_not_available")
 	}
-	if len(c.Body) > 32768 {
+	if len(c.Body) > maxBytes {
 		return nil, unavailable()
 	}
 	return map[string]any{"id": c.ID, "body": c.Body, "createdAt": c.Created, "updatedAt": c.Updated, "author": person(c.Author)}, nil
@@ -35,7 +35,7 @@ func (s *Server) comments(r *http.Request, key string, p *project, i Issue, chil
 		if err := decode(r, &req); err != nil {
 			return nil, err
 		}
-		if strings.TrimSpace(req.Body) == "" || len(req.Body) > 32768 {
+		if strings.TrimSpace(req.Body) == "" || len(req.Body) > s.maxFieldBytes {
 			return nil, failure(400, "invalid_body")
 		}
 		var out Comment
@@ -58,7 +58,7 @@ func (s *Server) comments(r *http.Request, key string, p *project, i Issue, chil
 		if out.ID != child {
 			return nil, failure(404, "resource_not_available")
 		}
-		return commentProjection(out)
+		return commentProjection(out, s.maxFieldBytes)
 	}
 	params, err := url.ParseQuery(r.URL.RawQuery)
 	if err != nil {
@@ -104,7 +104,7 @@ func (s *Server) comments(r *http.Request, key string, p *project, i Issue, chil
 		if c.Visibility != nil {
 			continue
 		}
-		item, err := commentProjection(c)
+		item, err := commentProjection(c, s.maxFieldBytes)
 		if err != nil {
 			return nil, err
 		}

@@ -103,6 +103,39 @@ func TestJiraAccountCacheTTLDefaultAndExplicitZero(t *testing.T) {
 	}
 }
 
+func TestJiraMaxFieldBytes(t *testing.T) {
+	for _, tt := range []struct {
+		name, extra string
+		want        int64
+	}{{"omitted", "", 65536}, {"minimum", `,"maxFieldBytes":1024`, 1024}, {"raised", `,"maxFieldBytes":131072`, 131072}, {"maximum", `,"maxFieldBytes":4194304`, 4194304}} {
+		t.Run(tt.name, func(t *testing.T) {
+			f, err := Parse([]byte(fmt.Sprintf(jiraCacheFixture, tt.extra)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := f.Jira.MaxFieldBytes; got != tt.want {
+				t.Fatalf("maxFieldBytes = %d, want %d", got, tt.want)
+			}
+		})
+	}
+	for _, value := range []string{"null", `"private-value"`, "1.5", "1.0", "1e2", "0", "1023", "4194305", "-1", "9223372036854775808", "true", "{}", "[]", `65536,"maxFieldBytes":1024`} {
+		t.Run(value, func(t *testing.T) {
+			_, err := Parse([]byte(fmt.Sprintf(jiraCacheFixture, `,"maxFieldBytes":`+value)))
+			if err == nil {
+				t.Fatal("invalid maxFieldBytes accepted")
+			}
+			if !strings.Contains(err.Error(), "jira.maxFieldBytes:") {
+				t.Fatalf("missing field path: %v", err)
+			}
+			for _, secret := range []string{"incoming-secret", "upstream-secret", "private-value", "jira.test", "9223372036854775808"} {
+				if strings.Contains(err.Error(), secret) {
+					t.Fatalf("configuration value leaked: %v", err)
+				}
+			}
+		})
+	}
+}
+
 func TestJiraAccountCacheTTLInvalidValues(t *testing.T) {
 	for _, value := range []string{"null", `"private-value"`, "1.5", "1.0", "1e2", "-1", "3601", "9223372036854775808", "true", "{}", "[]", `300,"accountCacheTtlSeconds":0`} {
 		t.Run(value, func(t *testing.T) {

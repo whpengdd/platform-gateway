@@ -116,7 +116,7 @@ func TestLoadConfigJiraAccountCacheTTL(t *testing.T) {
 			if profileReads.Load() != 0 {
 				t.Fatal("loading configuration unexpectedly reads Jira account")
 			}
-			s, err := jira.NewServer(cfg.jiraClient, auth.NewFromFile(cfg.authFile, nil), cfg.authFile.Jira.Projects)
+			s, err := jira.NewServer(cfg.jiraClient, auth.NewFromFile(cfg.authFile, nil), cfg.authFile.Jira.Projects, int(cfg.authFile.Jira.MaxFieldBytes))
 			if err != nil {
 				t.Fatal(err)
 			}

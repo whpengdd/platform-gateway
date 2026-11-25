@@ -47,7 +47,7 @@ func (s *Server) creation(ctx context.Context, key string, p *project) creation 
 			out.reason = "unsupported_create_field"
 			return out
 		}
-		if v, ok := p.CreateDefaults[f]; ok && (!validateValue(v, meta) || f == "summary" && (strings.TrimSpace(str(v)) == "" || len(str(v)) > 1024)) {
+		if v, ok := p.CreateDefaults[f]; ok && (!validateValue(v, meta, s.maxFieldBytes) || f == "summary" && (strings.TrimSpace(str(v)) == "" || len(str(v)) > 1024)) {
 			out.reason = "invalid_create_defaults"
 			return out
 		}
@@ -76,7 +76,7 @@ func (s *Server) capabilities(ctx context.Context, key string, p *project) (any,
 			if id == "summary" {
 				f["maxBytes"] = 1024
 			} else if m.Schema.Type == "string" {
-				f["maxBytes"] = 32768
+				f["maxBytes"] = s.maxFieldBytes
 			}
 			if len(m.Allowed) > 0 {
 				values := []any{}
@@ -85,7 +85,7 @@ func (s *Server) capabilities(ctx context.Context, key string, p *project) (any,
 					if schema.Type == "array" {
 						schema.Type = schema.Items
 					}
-					x, ok := projectValue(v, schema)
+					x, ok := projectValue(v, schema, s.maxFieldBytes)
 					if ok {
 						values = append(values, x)
 					}
@@ -130,7 +130,7 @@ func (s *Server) create(r *http.Request, key string, p *project) (any, error) {
 		req.Fields[f] = v
 	}
 	for f, v := range req.Fields {
-		if !validateValue(v, c.fields[f]) {
+		if !validateValue(v, c.fields[f], s.maxFieldBytes) {
 			return nil, failure(400, "invalid_body")
 		}
 		if f == "summary" {

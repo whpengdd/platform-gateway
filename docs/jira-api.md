@@ -55,7 +55,7 @@ GET /v1/jira/projects 无参数，示例：
   "issueTypeId": "10504",
   "createFields": [
     {"id":"summary","type":"string","required":true,"maxBytes":1024},
-    {"id":"description","type":"string","required":false,"maxBytes":32768}
+    {"id":"description","type":"string","required":false,"maxBytes":65536}
   ],
   "readFields": ["summary","status","updated"],
   "bot": {"identity":"bridge-bot","displayName":"支持机器人","email":null},
@@ -124,7 +124,7 @@ POST P/issues，body：
 }
 ```
 
-只允许 fields 中的配置白名单键；每个值按 Jira 创建元数据校验类型、枚举及大小，禁止通用 update/actions/properties 等逃逸结构。项目和 issue type 由路径及项目配置固定，不能在 fields 提交 project/issuetype/reporter/assignee/security。JSON 最多256 KiB，summary 最多1024字节、description 最多32 KiB，其余字段按元数据及程序限额限制。
+只允许 fields 中的配置白名单键；每个值按 Jira 创建元数据校验类型、枚举及大小，禁止通用 update/actions/properties 等逃逸结构。项目和 issue type 由路径及项目配置固定，不能在 fields 提交 project/issuetype/reporter/assignee/security。JSON 最多256 KiB，summary 最多1024字节，description 及其他字符串字段最多 `jira.maxFieldBytes` 字节（默认65536），其余字段按元数据及程序限额限制。
 
 受支持的字符串类型日期时间字段原样转发，包括 `+08:00`、`+0800` 或 `Z`；网关不按账号时区再加减小时。纯日期（如 duedate）、description/comment 内的日期文字也不做转换。字段仍须满足现有 schema 和配置约束，不因此扩展支持类型或承诺 Jira 接受无时区的日期时间格式。系统 `created` / `updated` 禁止作为创建字段，由 Jira 生成。此次搜索时区适配不修改已创建工单或 Jira 页面显示，也不表示已定位“创建时间少八小时”的现场问题。
 
@@ -150,7 +150,7 @@ GET P/issues/{issueKey}/comments 支持 limit（1–100，默认50）或后续 c
 
 createdAt / updatedAt 仅从 Jira 的 created / updated 改名投影，保留原始字符串、时区后缀及精度；正文中的时间文字不做统一补偿。
 
-POST P/issues/{issueKey}/comments，body 为 `{ "body": "调用方组织的正文" }`。正文必填非空、最多32 KiB。网关不添加 marker、不根据 articleId 防重、不组织附件引用。成功201返回 `{"commentId":"2001"}`；同一请求重复提交可能产生多个评论。
+POST P/issues/{issueKey}/comments，body 为 `{ "body": "调用方组织的正文" }`。正文必填非空、最多 `jira.maxFieldBytes` 字节（默认65536）。网关不添加 marker、不根据 articleId 防重、不组织附件引用。成功201返回 `{"commentId":"2001"}`；同一请求重复提交可能产生多个评论。
 
 ## 7. 附件
 
@@ -192,7 +192,7 @@ gateway 不自动重试写入，不提供持久幂等保证。客户端连接超
 
 ## 字段支持与接入差异
 
-字段配置只允许程序支持的投影。summary/description/updated 为标量，status 为 id/name；人员为 identity/displayName/email；附件为 id/filename/size/mimeType。禁止 readFields 包含 comment/issuelinks/subtasks/parent/worklog。customfield_<数字> 仅支持已确认的标量、选项 id/value、最小人员结构或这些类型的数组；未知复杂类型拒绝，不能透传任意嵌套对象。读取类型确认独立于创建能力，元数据暂不可得时相关读取返回503。
+字段配置只允许程序支持的投影。summary/description/updated 为标量，status 为 id/name；人员为 identity/displayName/email；附件为 id/filename/size/mimeType。禁止 readFields 包含 comment/issuelinks/subtasks/parent/worklog。customfield_<数字> 仅支持已确认的标量、选项 id/value、最小人员结构或这些类型的数组；未知复杂类型拒绝，不能透传任意嵌套对象。读取类型确认独立于创建能力，元数据暂不可得时相关读取返回503。单个文本字段（含字符串自定义字段与评论正文）超过 `jira.maxFieldBytes`（默认65536字节）时读取返回503 upstream_unavailable；确实存在更大字段时可调大该配置并重启。
 
 Zammad 所需 description、attachment 和实际客户字段须显式配置；人员键名、评论 createdAt/updatedAt 与原 Jira 字段的转换及附件按 ID 下载由调用方适配。详见 [源码字段核对](jira-field-compatibility.md)。
 
@@ -200,7 +200,7 @@ JQL 初次验证或运行时验证遇到暂时故障返回503，5秒退避后下
 
 ## 运行限制与接入核验
 
-JSON 请求 256 KiB、description/comment 32 KiB、文件 10 MiB、multipart 11 MiB（包含结束边界后的 HTTP body 数据，在上传 Jira 前完整校验）、上游及下游 JSON 4 MiB。附件支持 PNG/JPEG/PDF/纯文本，上传检查声明类型与内容；文件名禁止路径分隔符、控制字符和百分号。下载拒绝替代路径编码。
+JSON 请求 256 KiB、单个文本字段（issue 字段及评论正文）最多 `jira.maxFieldBytes` 字节（默认65536，可配置1024–4194304）、文件 10 MiB、multipart 11 MiB（包含结束边界后的 HTTP body 数据，在上传 Jira 前完整校验）、上游及下游 JSON 4 MiB。附件支持 PNG/JPEG/PDF/纯文本，上传检查声明类型与内容；文件名禁止路径分隔符、控制字符和百分号。下载拒绝替代路径编码。
 
 独立 FIFO 为 2 执行槽和 32 等待位，排队及上游操作各 30 秒，内部 HTTP 串行。向客户端写响应从首次输出起另有 30 秒连接写 deadline；此阶段不占 Jira 上游槽，慢读客户端超时后连接结束。每项目读取 60 次/分钟、写入 20 次/分钟、创建 100 次/UTC日、上传 200 MiB/UTC日；请求尝试消耗额度，同项目多 token 共用，重启清零。分钟窗口按 UTC epoch 分钟切换。
 

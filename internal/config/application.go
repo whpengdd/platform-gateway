@@ -26,6 +26,7 @@ type Jira struct {
 	Auth                   *UpstreamAuth      `json:"auth"`
 	Projects               map[string]Project `json:"projects"`
 	AccountCacheTtlSeconds int64              `json:"accountCacheTtlSeconds"`
+	MaxFieldBytes          int64              `json:"maxFieldBytes"`
 }
 type CKLogs struct {
 	BaseURL   string        `json:"baseUrl"`
@@ -122,6 +123,7 @@ func (f *File) validateApplication(b []byte) error {
 			BaseURL                *string                    `json:"baseUrl"`
 			Auth                   map[string]json.RawMessage `json:"auth"`
 			AccountCacheTtlSeconds *int64                     `json:"accountCacheTtlSeconds"`
+			MaxFieldBytes          *int64                     `json:"maxFieldBytes"`
 		} `json:"jira"`
 		CKLogs struct {
 			Auth map[string]json.RawMessage `json:"auth"`
@@ -145,6 +147,12 @@ func (f *File) validateApplication(b []byte) error {
 		}
 		if f.Jira.AccountCacheTtlSeconds < 0 || f.Jira.AccountCacheTtlSeconds > 3600 {
 			return invalid("jira.accountCacheTtlSeconds", "must be between 0 and 3600 seconds")
+		}
+		if raw.Jira.MaxFieldBytes == nil {
+			f.Jira.MaxFieldBytes = 65536
+		}
+		if f.Jira.MaxFieldBytes < 1024 || f.Jira.MaxFieldBytes > 4<<20 {
+			return invalid("jira.maxFieldBytes", "must be between 1024 and 4194304 bytes")
 		}
 		if raw.Jira.BaseURL != nil && !validURL(f.Jira.BaseURL, true) {
 			return invalid("jira.baseUrl", "must be an absolute HTTP or HTTPS URL with a valid host and port, without userinfo, query, fragment, encoded path or dot segments")

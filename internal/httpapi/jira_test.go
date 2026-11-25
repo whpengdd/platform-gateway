@@ -47,7 +47,7 @@ func TestJiraAuditRedaction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	js, err := jira.NewServer(client, a, f.Jira.Projects)
+	js, err := jira.NewServer(client, a, f.Jira.Projects, int(f.Jira.MaxFieldBytes))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +87,7 @@ func TestCKQueueDoesNotBlockJira(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	js, err := jira.NewServer(client, a, f.Jira.Projects)
+	js, err := jira.NewServer(client, a, f.Jira.Projects, int(f.Jira.MaxFieldBytes))
 	if err != nil {
 		t.Fatal(err)
 	}
