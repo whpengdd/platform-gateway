@@ -30,7 +30,8 @@ const (
 	logbotDefaultPollInterval = 500 * time.Millisecond
 	logbotMaxPollInterval     = 3 * time.Second
 	logbotMaxResponseBytes    = 16 << 20
-	logbotResultsPageSize     = 500
+	// logbotResultsPageSize 是 results 端点实测上限（page_size=100 放行、200 即 400）。
+	logbotResultsPageSize     = 100
 )
 
 // LogBotClient 走 LogBot agent 异步任务 API：
