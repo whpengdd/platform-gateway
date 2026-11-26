@@ -97,9 +97,8 @@ GATEWAY_CONFIG_FILE=/custom/path/config.json
     "logbot": {
       "baseUrl": "https://logbot.icoremail.net",
       "auth": {
-        "type": "login",
-        "username": "<logbot-user>",
-        "password": "<logbot-password>"
+        "type": "bearer",
+        "token": "<logbot-service-token>"
       },
       "pollIntervalMs": 500,
       "timeoutMs": 90000
@@ -219,7 +218,7 @@ Bearer 与 Basic 字段不能混用；凭据必须非空且不能含 CR/LF。JSO
 
 #### cklogs.provider：日志后端选择
 
-`provider=kibana`（默认）走现有 Kibana console proxy，需要 `cklogs.auth`（basic）。`provider=logbot` 切换到 LogBot 异步任务 API，需要 `cklogs.logbot.auth`：`type=login`（username+password 表单登录换 cookie，进程内缓存，401/重定向时自动重登一次）或 `type=bearer`（管理员发放的服务令牌，备选分支）。切换只需改配置并重启；改回 `kibana` 再重启即回滚。调用方 HTTP 路径、请求字段、响应结构、token 权限与共享队列行为不变。
+`provider=kibana`（默认）走现有 Kibana console proxy，需要 `cklogs.auth`（basic）。`provider=logbot` 切换到 LogBot agent 异步任务 API（`/api/agent/log-query/*`，JSON 提交+轮询+`page_token` 分页），需要 `cklogs.logbot.auth`：`type=bearer`（管理员发放的服务令牌，实测可用，**推荐**）或 `type=login`（username+password 表单登录换 cookie，进程内缓存，401/重定向时自动重登一次——注意 LogBot 的 `/api/login` cookie 目前不被 agent API 接受，仅作上游放开后的备选）。单任务时间窗上限 24h，更长窗口由网关自动切分串行提交。切换只需改配置并重启；改回 `kibana` 再重启即回滚。调用方 HTTP 路径、请求字段、响应结构、token 权限与共享队列行为不变。
 
 `provider=logbot` 但未配置 `cklogs.logbot.auth` 时不阻塞启动：`/ready` 返回非 200，cklogs 请求返回 `not_available`，且不发出上游请求。`provider=kibana` 且启用 cklogs 时缺 `cklogs.auth` 仍启动失败（既有行为）。LogBot 的账号、密码、cookie、令牌只存于宿主 `config.json`，不进入日志、审计或响应。
 

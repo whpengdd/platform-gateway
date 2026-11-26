@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -14,11 +13,27 @@ import (
 	"platform-gateway/internal/queue"
 )
 
-// logbotHTTPFake 是最小 LogBot 模拟：表单登录 + 提交任务 + 一次轮询成功。
+// logbotHTTPFake 是最小 LogBot agent 接口模拟：表单登录 + 提交任务 + 一次轮询成功 + 结果端点。
 type logbotHTTPFake struct {
-	srv      *httptest.Server
-	rows     []map[string]any
-	lastForm url.Values
+	srv     *httptest.Server
+	rows    []map[string]any
+	lastReq map[string]any
+}
+
+func (f *logbotHTTPFake) matched() []map[string]any {
+	srcs, _ := f.lastReq["log_sources"].([]any)
+	var rows []map[string]any
+	for _, row := range f.rows {
+		for _, src := range srcs {
+			if strings.EqualFold(asStringHTTP(row["log_source"]), asStringHTTP(src)) {
+				rows = append(rows, row)
+			}
+		}
+	}
+	if rows == nil {
+		rows = []map[string]any{}
+	}
+	return rows
 }
 
 func newLogbotHTTPFake(t *testing.T) *logbotHTTPFake {
@@ -29,36 +44,33 @@ func newLogbotHTTPFake(t *testing.T) *logbotHTTPFake {
 		http.SetCookie(w, &http.Cookie{Name: "logbot_session", Value: "unit-session", Path: "/"})
 		_, _ = w.Write([]byte(`{"ok":true}`))
 	})
-	mux.HandleFunc("/api/query-jobs", func(w http.ResponseWriter, r *http.Request) {
-		_ = r.ParseForm()
-		f.lastForm = r.PostForm
-		_, _ = w.Write([]byte(`{"job_id":"j1"}`))
+	mux.HandleFunc("/api/agent/log-query/jobs", func(w http.ResponseWriter, r *http.Request) {
+		var req map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		f.lastReq = req
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte(`{"job_id":"j1","status":"queued"}`))
 	})
-	mux.HandleFunc("/api/query-jobs/j1", func(w http.ResponseWriter, r *http.Request) {
-		srcs := f.lastForm["log_source[]"]
-		sources := map[string]any{}
-		var rows []map[string]any
-		for _, src := range srcs {
-			var matched []map[string]any
-			for _, row := range f.rows {
-				if strings.EqualFold(asStringHTTP(row["log_source"]), src) {
-					matched = append(matched, row)
-				}
-			}
-			rows = append(rows, matched...)
-			sources[src] = map[string]any{"status": "complete", "loaded": len(matched)}
-		}
-		if rows == nil {
-			rows = []map[string]any{}
-		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "job": map[string]any{
-			"job_id": "j1", "status": "success",
-			"result": map[string]any{"data": rows, "sources": sources},
-		}})
+	mux.HandleFunc("/api/agent/log-query/jobs/j1", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"job_id": "j1", "status": "success", "result_count": len(f.matched()),
+		})
+	})
+	mux.HandleFunc("/api/agent/log-query/jobs/j1/results", func(w http.ResponseWriter, r *http.Request) {
+		rows := f.matched()
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status": "success", "rows": rows, "total_count": len(rows),
+			"limits_applied": map[string]any{}, "retained_window": map[string]any{},
+		})
 	})
 	f.srv = httptest.NewServer(mux)
 	t.Cleanup(f.srv.Close)
 	return f
+}
+
+func (f *logbotHTTPFake) filter(key string) string {
+	m, _ := f.lastReq["filters"].(map[string]any)
+	return asStringHTTP(m[key])
 }
 
 func asStringHTTP(v any) string {
@@ -126,8 +138,8 @@ func TestLogBotEndToEndOutboundInbound(t *testing.T) {
 	if e0["sender"] != "a@unit.test" || e0["timestampIso"] != "2026-08-01T02:00:01.000Z" {
 		t.Fatalf("%v", e0)
 	}
-	if f.lastForm.Get("from_addr") != "a@unit.test" {
-		t.Fatalf("form=%v", f.lastForm)
+	if f.filter("from_addr") != "a@unit.test" {
+		t.Fatalf("req=%v", f.lastReq)
 	}
 
 	// inbound：a@unit.test 收到的 local 行。
@@ -139,8 +151,8 @@ func TestLogBotEndToEndOutboundInbound(t *testing.T) {
 	if n, _ := out["total"].(float64); n != 1 {
 		t.Fatalf("inbound total=%v entries=%v", out["total"], out["entries"])
 	}
-	if f.lastForm.Get("to_addr") != "a@unit.test" {
-		t.Fatalf("form=%v", f.lastForm)
+	if f.filter("to_addr") != "a@unit.test" {
+		t.Fatalf("req=%v", f.lastReq)
 	}
 
 	// both：内部 token 的分析接口，发件人过滤。

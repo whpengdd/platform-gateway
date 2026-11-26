@@ -54,18 +54,19 @@ func TestAuditReloginMarksFirstAttemptAuthExpired(t *testing.T) {
 	}
 }
 
-func TestAuditExpiredSourceEndToEnd(t *testing.T) {
+func TestAuditFailedJobEndToEnd(t *testing.T) {
 	f := newLogbotFake(t)
-	f.sources = map[string]map[string]any{"DA": {"status": "expired", "error": "retention exceeded"}}
+	f.jobStatuses = []string{"failed"}
+	f.jobError = "retention exceeded"
 	rec := &auditlog.Record{}
 	ctx := auditlog.WithRecord(context.Background(), rec)
 	out := NewLogBotService(f.client()).QuerySelfServiceDelivery(ctx, testInput())
 	if out.Status != "error" {
 		t.Fatalf("%+v", out)
 	}
-	c := lastCall(auditCalls(t, rec), "result")
-	if c.ErrorKind != "upstream_error" || c.OK || c.SourceStatus != "DA=expired" {
-		t.Fatalf("result audit: %+v", c)
+	c := lastCall(auditCalls(t, rec), "poll")
+	if c.ErrorKind != "upstream_error" || c.OK {
+		t.Fatalf("poll audit: %+v", c)
 	}
 }
 
@@ -93,7 +94,7 @@ func TestAudit422AndPollStatuses(t *testing.T) {
 		f := newLogbotFake(t)
 		inner := f.srv.Config.Handler
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/query-jobs/") {
+			if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/agent/log-query/jobs/") && !strings.HasSuffix(r.URL.Path, "/results") {
 				w.WriteHeader(tc.status)
 				return
 			}
@@ -131,60 +132,25 @@ func TestAudit422AndPollStatuses(t *testing.T) {
 	}
 }
 
-func TestSourceNameStatusErrorSanitized(t *testing.T) {
-	leakName := "DA-unit-svc-password"
-	leakStatus := "weird cookie=unit-session-cookie"
-	leakErr := "boom password=unit-svc-password cookie: unit-session-cookie"
-	mux := http.NewServeMux()
-	mux.HandleFunc("/api/login", func(w http.ResponseWriter, r *http.Request) {
-		http.SetCookie(w, &http.Cookie{Name: "logbot_session", Value: "unit-session-cookie", Path: "/"})
-		_, _ = w.Write([]byte(`{"ok":true}`))
-	})
-	mux.HandleFunc("/api/query-jobs", func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"job_id":"1"}`))
-	})
-	mux.HandleFunc("/api/query-jobs/", func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "job": map[string]any{
-			"job_id": "1", "status": "success",
-			"result": map[string]any{"data": []any{}, "sources": map[string]any{
-				"DA":     map[string]any{"status": "failed", "error": leakErr},
-				"MTA":    map[string]any{"status": leakStatus},
-				leakName: map[string]any{"status": "complete", "error": leakErr},
-			}},
-		}})
-	})
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
-	f := &logbotFake{}
-	f.srv = srv
-	cl := f.client()
-
-	for _, sources := range [][]string{{"DA", "MTA"}, {"DA"}} {
-		rec := &auditlog.Record{}
-		ctx := auditlog.WithRecord(context.Background(), rec)
-		res, fail := (&LogBotClient{BaseURL: cl.BaseURL, Username: cl.Username, Password: cl.Password, PollInterval: cl.PollInterval, Timeout: cl.Timeout, HTTPClient: cl.HTTPClient}).runQuery(ctx, map[string][]string{"log_source[]": sources}, sources)
-		var resp []byte
-		if fail != nil {
-			resp, _ = json.Marshal(fail)
-		} else {
-			assessed, afail := assessSources(sources, res.Sources, 0, []string{"unit-svc-password", "unit-session-cookie"})
-			resp, _ = json.Marshal([]any{assessed, afail})
-		}
-		audit := rec.Marshal()
-		for _, leak := range []string{"unit-svc-password", "unit-session-cookie", "cookie=", "cookie:", "password=", leakName, "weird"} {
-			if strings.Contains(string(audit), leak) {
-				t.Fatalf("audit leaks %q: %s", leak, audit)
-			}
-			if strings.Contains(string(resp), leak) {
-				t.Fatalf("response leaks %q: %s", leak, resp)
-			}
-		}
-		if got := lastCall(auditCalls(t, rec), "result").SourceStatus; !strings.Contains(got, "DA=failed") {
-			t.Fatalf("summary=%q", got)
-		}
+// 任务失败 error 里反射的凭据/cookie 不得进入审计或响应文本。
+func TestJobErrorSanitized(t *testing.T) {
+	f := newLogbotFake(t)
+	f.jobStatuses = []string{"failed"}
+	f.jobError = "boom password=unit-svc-password cookie: unit-session-cookie"
+	rec := &auditlog.Record{}
+	ctx := auditlog.WithRecord(context.Background(), rec)
+	out := NewLogBotService(f.client()).QuerySelfServiceDelivery(ctx, testInput())
+	if out.Status != "error" {
+		t.Fatalf("%+v", out)
 	}
-
-	if got := sourceStatusSummary(map[string]logbotSourceStatus{leakName: {Status: leakStatus}, "webadmin": {Status: "partial"}}); got != "unknown=unknown,webadmin=partial" {
-		t.Fatalf("summary=%q", got)
+	raw, _ := json.Marshal(out)
+	audit := rec.Marshal()
+	for _, leak := range []string{"unit-svc-password", "unit-session-cookie", "cookie:", "password="} {
+		if strings.Contains(string(audit), leak) {
+			t.Fatalf("audit leaks %q: %s", leak, audit)
+		}
+		if strings.Contains(string(raw), leak) {
+			t.Fatalf("response leaks %q: %s", leak, raw)
+		}
 	}
 }

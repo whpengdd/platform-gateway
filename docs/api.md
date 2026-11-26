@@ -101,20 +101,27 @@ curl -sS -X POST "$GW/v1/cklogs/analysis/delivery" \
 
 `config.json` 的 `cklogs.provider` 选择日志后端：`kibana`（默认，Kibana console proxy）或 `logbot`（LogBot 异步任务 API）。切换对调用方透明：路径、请求校验、响应结构、token 权限与 FIFO 队列不变。
 
-provider=logbot 时，LogBot 实测不支持的接口能力返回 `status=not_available` 并在 `limitations` 说明原因，**不会**用空结果冒充无记录：
+provider=logbot 时走 LogBot agent API（`/api/agent/log-query/*`）。实测不支持的接口能力返回 `status=not_available` 并在 `limitations` 说明原因，**不会**用空结果冒充无记录：
 
 | 能力 | logbot provider 下的行为 |
 |---|---|
-| `/v1/cklogs/delivery`、`analysis/delivery`（sender/recipient/subject/域名） | 可用；DA 只取 `cmd=local/remote` 行并去重，时间转 UTC；域名查询加 `platform_mode=all` |
-| `analysis/delivery` 的 `msgId` 筛选 | `not_available`（LogBot 无 tid/msgId 筛选） |
+| `/v1/cklogs/delivery`、`analysis/delivery`（sender/recipient/subject/域名） | 可用；时间转 UTC；域名查询加 `platform_mode=all`；超过 24h 的时间窗自动切分串行查询 |
+| `analysis/delivery` 的 `msgId` 筛选 | 仅 DA（投递日志）来源可用（映射为 `mid` 筛选）；其他来源 `not_available` |
 | `/v1/cklogs/message`（按 tid 串联轨迹） | `not_available`（LogBot 行无 tid 列） |
-| `/v1/cklogs/login`、`analysis/auth`（pop3/webmail/smtp/imap） | `not_available`（登录日志类型在 LogBot 暂不支持查询；SMTP 登录理论上只有 MTA AUTH 行，且不能按账号过滤） |
-| `analysis/ops`（webmail/pop3 删信等操作） | `not_available`（同上） |
+| `/v1/cklogs/login`、`analysis/auth`（pop3/webmail/smtp/imap） | `not_available`（登录日志类型在 LogBot 暂不支持查询） |
+| `analysis/ops`（webmail/pop3 删信等操作） | `not_available`（同上；agent API 另有 `user_operation` 查询类型，待评估接入） |
 | dasvr 投递流水（delivery_pipeline） | `not_available`（LogBot 无此来源） |
 
-来源完整性如实上报：LogBot 每来源展示上限 1000 行，达到时响应 `truncated=true` 且 `limitations` 写明可能还有更多；来源 `partial` 时给出已扫描截止时间（`scanned_through`），不写成「没有记录」；所需来源全部失败时返回 `status=error`。轮询在操作预算内完成，预算耗尽按超时语义返回（不返回 `total=0`）。
+agent API 返回的窄列导致以下降级，均在 `limitations` 中如实说明：
 
-Kibana 下线前需由 LogBot 方补齐的清单：tid 列与 tid/msgId 筛选、dasvr 投递流水、pop3/webmail 登录与操作日志来源、SMTP 登录按账号过滤。
+- DA 行**无 cmd 列**：无法区分投递动作类型（local/remote/antivirus），`deliveryStatus` 保持 `unknown` 不臆断。
+- DA 行**无 hdrmsgid/commrefid 分组键**：同一封邮件的多次投递动作无法归并，按行逐条保留，条数不代表邮件封数。
+- MTA 行**无 result/respond**：投递失败判读断供，`deliveryStatus=unknown` 需人工核查。
+- agent 实测会返回**完全重复的行**，网关按整行序列化去重；`total_count` 为去重前口径。
+
+完整性如实上报：结果快照达上限（`snapshot_truncated`，单任务约 1000 行）时响应 `truncated=true` 且 `limitations` 写明可能还有更多、不写成「没有记录」；任务失败返回 `status=error` 并带脱敏后的上游说明。轮询在操作预算内完成，预算耗尽按超时语义返回（不返回 `total=0`）。
+
+Kibana 下线前需由 LogBot 方补齐的清单：tid 列与 tid 筛选、DA 行 cmd 列与 hdrmsgid/commrefid 关联键、MTA 行 result/respond、dasvr 投递流水、pop3/webmail 登录与操作日志来源。
 
 ---
 

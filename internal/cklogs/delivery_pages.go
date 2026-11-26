@@ -21,6 +21,12 @@ func (s *Service) queryDeliveryAgentPages(ctx context.Context, filters Filters) 
 		}
 		return QueryResult{ErrorKind: kind, Message: ctx.Err().Error()}, ""
 	}
+	if s.backendName() == "logbot" {
+		// LogBot agent 接口支持游标分页，计数与明细一致性假设不成立
+		// （实测会返回完全重复的行，去重后条数恒小于 total_count）：直接查明细。
+		detail := s.backend().Query(ctx, filters, QueryOptions{Dataset: "delivery_agent", Stage: "da_full", FullSize: true})
+		return detail, ""
+	}
 	count := s.backend().Query(ctx, filters, QueryOptions{Dataset: "delivery_agent", CountOnly: true, Stage: "da_count"})
 	if !count.OK {
 		return count, ""

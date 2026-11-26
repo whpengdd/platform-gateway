@@ -86,9 +86,12 @@ func logbotRowToKibanaSource(row map[string]any, source string) map[string]any {
 	case "MTA":
 		// mtatrans：mapHitToEntry 读取 sender/rcpt/subject/cmd/result/commresult/
 		// clientip/cactag/datarulename/cntrulename/otherlog。
-		logbotPut(out, "sender", firstNonEmpty(row["sender"], row["mailfrom"]))
+		logbotPut(out, "sender", firstNonEmpty(row["sender"], row["mailfrom"], row["hdrfrom"]))
 		if rcpt, ok := row["rcpt"].([]any); ok {
 			out["rcpt"] = rcpt
+		} else if to := strings.TrimSpace(asString(row["to"])); to != "" {
+			// agent 接口 MTA 行用标量 to 承载收件人。
+			out["rcpt"] = []any{to}
 		} else {
 			logbotPut(out, "rcpt", row["rcpt"])
 		}
@@ -102,7 +105,7 @@ func logbotRowToKibanaSource(row map[string]any, source string) map[string]any {
 		logbotPut(out, "cntrulename", row["cntrulename"])
 	case "PROXYSVR":
 		// proxytrans：mapDeliveryProxyHit 读取 from/to/subject/result/desc/ip/log_source。
-		logbotPut(out, "from", firstNonEmpty(row["from"], row["mailfrom"]))
+		logbotPut(out, "from", firstNonEmpty(row["from"], row["mailfrom"], row["hdrfrom"]))
 		logbotPut(out, "to", row["to"])
 		logbotPut(out, "subject", row["subject"])
 		logbotPut(out, "result", row["result"])
@@ -128,39 +131,29 @@ func mapLogBotRow(row map[string]any, source string) Entry {
 
 // logbotDAMainCmd 报告 DA 行是否为主命令行：实测 LogBot 的 DA 一次投递包含
 // antivirus、local、remote 和空 cmd 的汇总行，业务对齐只取 local/remote。
+// agent 接口行不含 cmd 列，此函数只用于遗留测试/防御性过滤；
+// 缺 cmd 的行按主命令行对待（agent 窄列已无 antivirus 汇总行）。
 func logbotDAMainCmd(row map[string]any) bool {
 	cmd := strings.ToLower(strings.TrimSpace(asString(row["cmd"])))
-	return cmd == "local" || cmd == "remote"
+	return cmd == "" || cmd == "local" || cmd == "remote"
 }
 
-// logbotRowKey 用于 LogBot 行去重（同一来源可能返回重复行）。
+// logbotRowKey 用于 LogBot 行去重（agent 接口实测会返回完全重复的行）。
+// agent 行不含 hdrmsgid/commrefid 等关联键，只能按整行序列化折叠完全重复的行，
+// 不能把不同邮件的相似行误并。
 func logbotRowKey(row map[string]any, source string) string {
+	raw, err := json.Marshal(row)
+	if err == nil {
+		return source + "\x00" + string(raw)
+	}
+	// 序列化失败兜底：拼接常见字段。
 	parts := []string{
 		source,
 		asString(row["timestamp"]),
 		asString(firstNonEmpty(row["mailfrom"], row["sender"], row["from"], row["hdrfrom"])),
 		asString(row["to"]),
 		asString(row["subject"]),
-		strings.ToLower(strings.TrimSpace(asString(row["cmd"]))),
 		asString(row["result"]),
-		asString(row["folderid"]),
-	}
-	if other, ok := row["otherlog"].(map[string]any); ok {
-		// 不同邮件可能同秒同发件人同主题同收件人，不把去重键放宽到跨邮件命中。
-		parts = append(parts, asString(other["hdrmsgid"]), asString(other["commrefid"]))
-	}
-	if rcpt, ok := row["rcpt"].([]any); ok {
-		parts = append(parts, asString(rcpt))
-	}
-	if source == logbotSourceDA {
-		other := logbotDAOtherlog(row)
-		if strings.TrimSpace(asString(other["hdrmsgid"])) == "" && strings.TrimSpace(asString(other["commrefid"])) == "" {
-			// 无键行不能靠公共字段合并（实测同秒同发件人同主题的不同邮件存在）：
-			// 序列化整行，只有完全重复的行才折叠。
-			if raw, err := json.Marshal(row); err == nil {
-				parts = append(parts, "fullrow", string(raw))
-			}
-		}
 	}
 	return strings.Join(parts, "\x00")
 }

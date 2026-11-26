@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -19,28 +19,32 @@ import (
 type logbotFake struct {
 	srv *httptest.Server
 
-	mu           sync.Mutex
-	logins       int
-	submits      int
-	polls        int
-	lastForm     url.Values
-	failLogin    bool
-	poll401Once  bool
-	redirectOnce bool
-	submitStatus int
-	submitDetail string
-	jobStatuses  []string // 每次轮询依次返回；耗尽后返回 success
-	neverDone    bool     // 轮询恒为 running（预算耗尽测试）
-	jobError     string
-	rows         []map[string]any
-	sources      map[string]map[string]any // 按来源名覆盖状态；未覆盖时默认 complete
-	jobs         map[string]url.Values
-	nextJob      int
+	mu            sync.Mutex
+	logins        int
+	submits       int
+	polls         int
+	resultCalls   int
+	lastReq       map[string]any
+	reqs          []map[string]any
+	failLogin     bool
+	poll401Once   bool
+	redirectOnce  bool
+	submitStatus  int
+	submitDetail  string
+	resultsStatus int
+	jobStatuses   []string // 每次轮询依次返回；耗尽后返回 success
+	neverDone     bool     // 轮询恒为 running（预算耗尽测试）
+	jobError      string
+	rows          []map[string]any
+	truncated     bool // 结果快照标记 snapshot_truncated
+	totalCount    int  // 覆盖 total_count；-1 表示按匹配行数
+	jobs          map[string]map[string]any
+	nextJob       int
 }
 
 func newLogbotFake(t *testing.T) *logbotFake {
 	t.Helper()
-	f := &logbotFake{jobs: map[string]url.Values{}}
+	f := &logbotFake{jobs: map[string]map[string]any{}, totalCount: -1}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/login", func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
@@ -56,19 +60,22 @@ func newLogbotFake(t *testing.T) *logbotFake {
 		http.SetCookie(w, &http.Cookie{Name: "logbot_session", Value: "unit-session-cookie", Path: "/"})
 		_, _ = w.Write([]byte(`{"ok":true}`))
 	})
-	mux.HandleFunc("/api/query-jobs", func(w http.ResponseWriter, r *http.Request) {
-		_ = r.ParseForm()
+	mux.HandleFunc("/api/agent/log-query/jobs", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		f.submits++
-		f.lastForm = r.PostForm
 		authed := f.hasAuthLocked(r)
 		status := f.submitStatus
 		detail := f.submitDetail
+		var req map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		f.lastReq = req
+		var jobID string
 		if authed && status == 0 {
 			f.nextJob++
-			f.jobs[itoa(f.nextJob)] = r.PostForm
+			jobID = itoa(f.nextJob)
+			f.jobs[jobID] = req
+			f.reqs = append(f.reqs, req)
 		}
-		jobID := itoa(f.nextJob)
 		f.mu.Unlock()
 		if !authed {
 			w.Header().Set("Location", "/login.html")
@@ -81,21 +88,34 @@ func newLogbotFake(t *testing.T) *logbotFake {
 			_, _ = w.Write([]byte(`{"detail":` + string(raw) + `}`))
 			return
 		}
-		_, _ = w.Write([]byte(`{"job_id":"` + jobID + `"}`))
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte(`{"job_id":"` + jobID + `","status":"queued"}`))
 	})
-	mux.HandleFunc("/api/query-jobs/", func(w http.ResponseWriter, r *http.Request) {
-		jobID := strings.TrimPrefix(r.URL.Path, "/api/query-jobs/")
+	mux.HandleFunc("/api/agent/log-query/jobs/", func(w http.ResponseWriter, r *http.Request) {
+		rest := strings.TrimPrefix(r.URL.Path, "/api/agent/log-query/jobs/")
 		f.mu.Lock()
-		f.polls++
 		authed := f.hasAuthLocked(r)
-		if authed && f.poll401Once {
+		if !authed {
+			f.mu.Unlock()
+			w.Header().Set("Location", "/login.html")
+			w.WriteHeader(http.StatusFound)
+			return
+		}
+		if strings.HasSuffix(rest, "/results") {
+			jobID := strings.TrimSuffix(rest, "/results")
+			f.resultsLocked(w, r, jobID)
+			f.mu.Unlock()
+			return
+		}
+		f.polls++
+		if f.poll401Once {
 			f.poll401Once = false
 			f.mu.Unlock()
 			w.WriteHeader(http.StatusUnauthorized)
 			_, _ = w.Write([]byte(`{"detail":"session expired"}`))
 			return
 		}
-		if authed && f.redirectOnce {
+		if f.redirectOnce {
 			f.redirectOnce = false
 			f.mu.Unlock()
 			w.Header().Set("Location", "/login.html")
@@ -113,47 +133,81 @@ func newLogbotFake(t *testing.T) *logbotFake {
 			status = "success"
 		}
 		jobErr := f.jobError
-		form := f.jobs[jobID]
-		var rows []map[string]any
-		var sources map[string]map[string]any
-		if status == "success" {
-			srcs := form["log_source[]"]
-			sources = map[string]map[string]any{}
-			for _, src := range srcs {
-				var matched []map[string]any
-				for _, row := range f.rows {
-					if strings.EqualFold(asString(row["log_source"]), src) {
-						matched = append(matched, row)
-					}
-				}
-				rows = append(rows, matched...)
-				st, ok := f.sources[src]
-				if !ok {
-					st = map[string]any{"status": "complete", "loaded": len(matched)}
-				}
-				sources[src] = st
-			}
-			if rows == nil {
-				rows = []map[string]any{}
-			}
-		}
+		matched := f.matchedRowsLocked(rest)
 		f.mu.Unlock()
-		if !authed {
-			w.Header().Set("Location", "/login.html")
-			w.WriteHeader(http.StatusFound)
-			return
-		}
-		job := map[string]any{"job_id": jobID, "status": status}
+		job := map[string]any{"job_id": rest, "status": status}
 		if status == "success" {
-			job["result"] = map[string]any{"data": rows, "sources": sources}
+			job["result_count"] = len(matched)
 		} else if status != "queued" && status != "running" {
 			job["error"] = jobErr
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "job": job})
+		_ = json.NewEncoder(w).Encode(job)
 	})
 	f.srv = httptest.NewServer(mux)
 	t.Cleanup(f.srv.Close)
 	return f
+}
+
+// matchedRowsLocked 返回该任务 log_sources 匹配的 fixture 行（调用时须持锁）。
+func (f *logbotFake) matchedRowsLocked(jobID string) []map[string]any {
+	req := f.jobs[jobID]
+	var srcs []any
+	if l, ok := req["log_sources"].([]any); ok {
+		srcs = l
+	}
+	var matched []map[string]any
+	for _, row := range f.rows {
+		for _, s := range srcs {
+			if strings.EqualFold(asString(row["log_source"]), asString(s)) {
+				matched = append(matched, row)
+			}
+		}
+	}
+	if matched == nil {
+		matched = []map[string]any{}
+	}
+	return matched
+}
+
+// resultsLocked 处理 GET /jobs/{id}/results：支持 page_size/page_token 翻页（游标为行偏移）。
+func (f *logbotFake) resultsLocked(w http.ResponseWriter, r *http.Request, jobID string) {
+	f.resultCalls++
+	if st := f.resultsStatus; st != 0 {
+		w.WriteHeader(st)
+		_, _ = w.Write([]byte(`{"detail":"results error"}`))
+		return
+	}
+	matched := f.matchedRowsLocked(jobID)
+	pageSize := 500
+	if ps := r.URL.Query().Get("page_size"); ps != "" {
+		if n, err := strconv.Atoi(ps); err == nil && n > 0 {
+			pageSize = n
+		}
+	}
+	offset := 0
+	if pt := r.URL.Query().Get("page_token"); pt != "" {
+		if n, err := strconv.Atoi(strings.TrimPrefix(pt, "off-")); err == nil {
+			offset = n
+		}
+	}
+	end := offset + pageSize
+	if end > len(matched) {
+		end = len(matched)
+	}
+	page := matched[offset:end]
+	next := ""
+	if end < len(matched) {
+		next = "off-" + itoa(end)
+	}
+	total := f.totalCount
+	if total < 0 {
+		total = len(matched)
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"status": "success", "rows": page, "total_count": total,
+		"limits_applied": map[string]any{}, "next_page_token": next,
+		"snapshot_truncated": f.truncated, "retained_window": map[string]any{},
+	})
 }
 
 // hasAuthLocked 接受会话 cookie 或正确的 Bearer 服务令牌（备选分支）。
@@ -180,41 +234,35 @@ func (f *logbotFake) client() *LogBotClient {
 
 func (f *logbotFake) service() *Service { return NewLogBotService(f.client()) }
 
-func daRow(ts, from, to, cmd, result, folderID string, other map[string]any) map[string]any {
-	row := map[string]any{
+// daRow 构造 agent 接口形态的 DA 行（固定 11 列；无 cmd/folderid/otherlog/分组键）。
+func daRow(ts, from, to, result string) map[string]any {
+	return map[string]any{
 		"timestamp":  ts,
 		"mailfrom":   from,
+		"hdrfrom":    from,
 		"to":         to,
 		"subject":    "unit test subject",
-		"cmd":        cmd,
 		"result":     result,
-		"folderid":   folderID,
 		"commresult": "Non-Spam",
 		"log_source": "DA",
+		"ip":         "10.0.0.1",
 	}
-	if other != nil {
-		row["otherlog"] = other
-	}
-	return row
 }
 
 func TestLogBotDeliveryOutboundFlow(t *testing.T) {
 	f := newLogbotFake(t)
 	f.rows = []map[string]any{
-		// antivirus 行与空 cmd 汇总行必须被过滤；重复 local 行必须去重。
-		daRow("2026-08-01 10:00:00+08:00", "sender@example.com", "peer@example.com", "antivirus", "0", "", nil),
-		daRow("2026-08-01 10:00:00+08:00", "sender@example.com", "peer@example.com", "", "0", "", nil),
-		daRow("2026-08-01 10:00:01+08:00", "sender@example.com", "peer@example.com", "local", "0", "1", map[string]any{"hdrmsgid": "<unit-msg-1@example.com>"}),
-		daRow("2026-08-01 10:00:01+08:00", "sender@example.com", "peer@example.com", "local", "0", "1", map[string]any{"hdrmsgid": "<unit-msg-1@example.com>"}),
-		daRow("2026-08-01 10:00:02+08:00", "sender@example.com", "peer@example.com", "remote", "0", "", map[string]any{"hdrmsgid": "<unit-msg-1@example.com>"}),
-		// 已发送副本必须被过滤。
-		daRow("2026-08-01 10:00:03+08:00", "sender@example.com", "peer@example.com", "local", "0", "3", map[string]any{"hdrmsgid": "<unit-msg-2@example.com>"}),
+		// agent 接口实测会返回完全重复的行：必须整行去重。
+		daRow("2026-08-01 10:00:01+08:00", "sender@example.com", "peer@example.com", "0"),
+		daRow("2026-08-01 10:00:01+08:00", "sender@example.com", "peer@example.com", "0"),
+		// 同封邮件的另一条投递行动行：无分组键，逐行保留。
+		daRow("2026-08-01 10:00:02+08:00", "sender@example.com", "peer@example.com", "0"),
 	}
-	f.sources = map[string]map[string]any{"DA": {"status": "complete", "loaded": 6, "scanned_through": "2026-08-02 00:00:00"}}
 	out := f.service().QuerySelfServiceDelivery(context.Background(), testInput())
 	if out.Status != "ok" {
 		t.Fatalf("%+v", out)
 	}
+	// 服务层按 message-id/tid+收件人聚合同一封邮件：两行代表同一投递 → 1 条。
 	if out.Total == nil || *out.Total != 1 {
 		t.Fatalf("total=%v entries=%d", out.Total, len(out.Entries))
 	}
@@ -225,7 +273,8 @@ func TestLogBotDeliveryOutboundFlow(t *testing.T) {
 	if e.Sender != "sender@example.com" || len(e.Recipients) != 1 || e.Recipients[0] != "peer@example.com" {
 		t.Fatalf("%+v", e)
 	}
-	if e.DeliveryStatus != "delivered" || e.MessageID != "<unit-msg-1@example.com>" {
+	// agent 行无 cmd 列：投递状态不可判定，必须保持 unknown 而非臆断 delivered。
+	if e.DeliveryStatus != "unknown" || e.MessageID != "" {
 		t.Fatalf("%+v", e)
 	}
 	if e.Tid != "" || e.Mid != "" {
@@ -243,21 +292,22 @@ func TestLogBotDeliveryOutboundFlow(t *testing.T) {
 	if f.logins != 1 {
 		t.Fatalf("logins=%d (session must be cached)", f.logins)
 	}
-	form := f.lastForm
-	if form.Get("query_type") != "transmission" || form.Get("from_addr") != "sender@example.com" {
-		t.Fatalf("form=%v", form)
+	req := f.lastReq
+	filters, _ := req["filters"].(map[string]any)
+	if req["query_type"] != "transmission" || filters["from_addr"] != "sender@example.com" {
+		t.Fatalf("req=%v", req)
 	}
-	if form.Get("start_time") != "2026-08-01 08:00:00" || form.Get("end_time") != "2026-08-02 07:59:59" {
-		t.Fatalf("time window: %v %v", form.Get("start_time"), form.Get("end_time"))
+	if req["start_time"] != "2026-08-01 08:00:00" || req["end_time"] != "2026-08-02 07:59:59" {
+		t.Fatalf("time window: %v %v", req["start_time"], req["end_time"])
 	}
 }
 
 func TestLogBotDeliveryLimitMarksTruncated(t *testing.T) {
 	f := newLogbotFake(t)
 	f.rows = []map[string]any{
-		daRow("2026-08-01 10:00:01+08:00", "sender@example.com", "peer@example.com", "remote", "0", "", map[string]any{"hdrmsgid": "<unit-msg-9@example.com>"}),
+		daRow("2026-08-01 10:00:01+08:00", "sender@example.com", "peer@example.com", "0"),
 	}
-	f.sources = map[string]map[string]any{"DA": {"status": "limit", "loaded": 1000}}
+	f.truncated = true
 	out := f.service().QuerySelfServiceDelivery(context.Background(), testInput())
 	if out.Status != "ok" {
 		t.Fatalf("%+v", out)
@@ -266,7 +316,7 @@ func TestLogBotDeliveryLimitMarksTruncated(t *testing.T) {
 		t.Fatalf("truncated=%v", out.Truncated)
 	}
 	joined := strings.Join(out.Limitations, "\n")
-	if !strings.Contains(joined, "展示上限") {
+	if !strings.Contains(joined, "快照上限") {
 		t.Fatalf("lim=%v", out.Limitations)
 	}
 }
@@ -365,9 +415,10 @@ func TestLogBotPollBudgetExhausted(t *testing.T) {
 	}
 }
 
-func TestLogBotPartialSourceIsNotEmptyClaim(t *testing.T) {
+// 快照截断时不得给出"精确命中 0 条"式的空结果结论，须带快照上限提示。
+func TestLogBotTruncatedIsNotEmptyClaim(t *testing.T) {
 	f := newLogbotFake(t)
-	f.sources = map[string]map[string]any{"MTA": {"status": "partial", "loaded": 0, "scanned_through": "2026-08-01 12:00:00"}}
+	f.truncated = true
 	out := f.service().QueryAnalysisDelivery(context.Background(), DeliveryQuery{
 		Direction: "outbound",
 		Sender:    "sender@example.com",
@@ -378,55 +429,38 @@ func TestLogBotPartialSourceIsNotEmptyClaim(t *testing.T) {
 	}
 	joined := strings.Join(out.Limitations, "\n")
 	if strings.Contains(joined, "精确命中 0 条") {
-		t.Fatalf("partial source must not claim zero records: %v", out.Limitations)
+		t.Fatalf("truncated result must not claim zero records: %v", out.Limitations)
 	}
-	if !strings.Contains(joined, "2026-08-01 12:00:00") {
-		t.Fatalf("partial limitation must include scanned_through: %v", out.Limitations)
+	if !strings.Contains(joined, "快照上限") {
+		t.Fatalf("lim=%v", out.Limitations)
 	}
 }
 
-func TestLogBotSkippedFutureSource(t *testing.T) {
+func TestLogBotResultsEndpointError(t *testing.T) {
 	f := newLogbotFake(t)
-	f.sources = map[string]map[string]any{"MTA": {"status": "skipped_future", "loaded": 0}}
+	f.resultsStatus = http.StatusNotFound
 	out := f.service().QueryAnalysisDelivery(context.Background(), DeliveryQuery{
 		Direction: "outbound",
 		Sender:    "sender@example.com",
 		TimeRange: testRange(),
 	})
-	if out.Status != "ok" {
+	if out.Status != "error" || out.Code != "CK_LOGS_UPSTREAM_ERROR" {
 		t.Fatalf("%+v", out)
 	}
-	if !strings.Contains(strings.Join(out.Limitations, "\n"), "在未来") {
+	if !strings.Contains(strings.Join(out.Limitations, "\n"), "404") {
 		t.Fatalf("lim=%v", out.Limitations)
 	}
 }
 
-func TestLogBotAllSourcesFailed(t *testing.T) {
-	f := newLogbotFake(t)
-	f.sources = map[string]map[string]any{"MTA": {"status": "failed", "error": "disk full"}}
-	out := f.service().QueryAnalysisDelivery(context.Background(), DeliveryQuery{
-		Direction: "outbound",
-		Sender:    "sender@example.com",
-		TimeRange: testRange(),
-	})
-	if out.Status != "error" {
-		t.Fatalf("%+v", out)
-	}
-	if !strings.Contains(strings.Join(out.Limitations, "\n"), "disk full") {
-		t.Fatalf("lim=%v", out.Limitations)
-	}
-}
-
+// countOnly 只取 total_count，不翻页拉明细。
 func TestLogBotCountOnlyUsesFilteredCount(t *testing.T) {
 	f := newLogbotFake(t)
 	f.rows = []map[string]any{
-		daRow("2026-08-01 10:00:01+08:00", "sender@example.com", "peer@example.com", "local", "0", "1", nil),
-		daRow("2026-08-01 10:00:02+08:00", "sender@example.com", "peer@example.com", "antivirus", "0", "", nil),
+		daRow("2026-08-01 10:00:01+08:00", "sender@example.com", "peer@example.com", "0"),
 	}
 	in := testInput()
 	in.CountOnly = true
 	out := f.service().QuerySelfServiceDelivery(context.Background(), in)
-	// antivirus 行被过滤，计数与明细口径一致（只算 local/remote）。
 	if out.Status != "ok" || out.Total == nil || *out.Total != 1 {
 		t.Fatalf("%+v", out)
 	}
@@ -447,8 +481,26 @@ func TestLogBotDomainQueryAddsPlatformMode(t *testing.T) {
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.lastForm.Get("platform_mode") != "all" || f.lastForm.Get("from_addr") != "example.com" {
-		t.Fatalf("domain query form=%v", f.lastForm)
+	filters, _ := f.lastReq["filters"].(map[string]any)
+	if f.lastReq["platform_mode"] != "all" || filters["from_addr"] != "example.com" {
+		t.Fatalf("domain query req=%v", f.lastReq)
+	}
+}
+
+// DA 源的 msgId 走 mid 筛选提交给 LogBot；非 DA 源才直接 not_available。
+func TestLogBotMsgIDOnDAUsesMidFilter(t *testing.T) {
+	f := newLogbotFake(t)
+	res := LogBotBackend{Client: f.client()}.Query(context.Background(),
+		Filters{MsgID: "unit-mid-1", TimeRange: testRange()},
+		QueryOptions{Dataset: "delivery_agent"})
+	if !res.OK {
+		t.Fatalf("%+v", res)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	filters, _ := f.lastReq["filters"].(map[string]any)
+	if filters["mid"] != "unit-mid-1" {
+		t.Fatalf("req=%v", f.lastReq)
 	}
 }
 
@@ -522,7 +574,6 @@ func TestLogBotNotConfigured(t *testing.T) {
 
 func TestLogBotAuditTrail(t *testing.T) {
 	f := newLogbotFake(t)
-	f.sources = map[string]map[string]any{"DA": {"status": "complete", "loaded": 0}}
 	rec := &auditlog.Record{}
 	ctx := auditlog.WithRecord(context.Background(), rec)
 	out := f.service().QuerySelfServiceDelivery(ctx, testInput())
@@ -553,9 +604,8 @@ func TestLogBotAuditTrail(t *testing.T) {
 }
 
 func TestLogBotBearerFallback(t *testing.T) {
-	// Bearer 备选分支：不登录，直接带 Authorization 头。
+	// Bearer 服务令牌：不登录，直接带 Authorization 头。
 	f := newLogbotFake(t)
-	f.sources = map[string]map[string]any{"DA": {"status": "complete", "loaded": 0}}
 	c := f.client()
 	c.Username, c.Password = "", ""
 	c.Token = "unit-service-token"
@@ -577,7 +627,7 @@ func TestLogBotMTAFallbackUnknownHint(t *testing.T) {
 	f.rows = []map[string]any{{
 		"timestamp":  "2026-08-01 10:00:00+08:00",
 		"sender":     "sender@example.com",
-		"rcpt":       []any{"peer@example.com"},
+		"to":         "peer@example.com",
 		"cmd":        "DATA",
 		"log_source": "MTA",
 	}}

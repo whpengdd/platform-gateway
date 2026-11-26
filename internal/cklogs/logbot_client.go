@@ -1,6 +1,7 @@
 package cklogs
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,7 +10,6 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -22,19 +22,24 @@ import (
 const (
 	// LogBotDefaultBaseURL 是 LogBot 服务的默认地址（内网 172.16.1.10，部署机 hosts 解析）。
 	LogBotDefaultBaseURL = "https://logbot.icoremail.net"
-	// LogBotDisplayLimit 是 LogBot 每个来源的展示上限（实测 1000 行，达到时 status=limit）。
+	// LogBotDisplayLimit 是请求侧 max_results / 上游快照的行上限（实测 snapshot 上限 1000 行）。
 	LogBotDisplayLimit = 1000
+	// logbotAgentMaxWindow 是 agent API 单次任务的时间窗上限（实测 24h00m00s 放行、+1s 即 400）。
+	logbotAgentMaxWindow = 24 * time.Hour
 
 	logbotDefaultPollInterval = 500 * time.Millisecond
 	logbotMaxPollInterval     = 3 * time.Second
 	logbotMaxResponseBytes    = 16 << 20
+	logbotResultsPageSize     = 500
 )
 
-// LogBotClient 走 LogBot 异步任务 API：POST /api/query-jobs 提交表单，
-// 轮询 GET /api/query-jobs/{job_id} 直到任务到达终态或预算耗尽。
+// LogBotClient 走 LogBot agent 异步任务 API：
+// POST /api/agent/log-query/jobs 提交 JSON 任务，轮询 GET /jobs/{job_id}
+// 到终态后经 GET /jobs/{job_id}/results 按 page_token 翻页取回行。
+// 单次任务时间窗上限 24h；调用方负责把更长窗口切分。
 //
-// 鉴权以 POST /api/login 表单（username/password）换 cookie 为主，进程内缓存复用；
-// 401/重定向时加锁重登一次并重试原请求。Bearer 服务令牌（Token 字段）保留为备选分支。
+// 鉴权以管理员发放的 Bearer 服务令牌为主（auth.type=bearer）；
+// 表单登录（username/password）换 cookie 作为备选，401/重定向时加锁重登一次。
 // 账号、密码、cookie、令牌绝不进入日志、审计或响应。
 type LogBotClient struct {
 	BaseURL      string
@@ -100,17 +105,17 @@ func isRedirectStatus(status int) bool {
 
 // rawDo 执行一次 HTTP 调用（已带鉴权），返回状态码与响应体；只在网络/超时/读失败时返回 fail。
 // 调用方负责审计。
-func (c *LogBotClient) rawDo(ctx context.Context, method, path string, form url.Values) (int, []byte, time.Duration, *QueryResult) {
-	var body io.Reader
-	if form != nil {
-		body = strings.NewReader(form.Encode())
+func (c *LogBotClient) rawDo(ctx context.Context, method, path string, body []byte, contentType string) (int, []byte, time.Duration, *QueryResult) {
+	var rd io.Reader
+	if body != nil {
+		rd = bytes.NewReader(body)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, c.baseURL()+path, body)
+	req, err := http.NewRequestWithContext(ctx, method, c.baseURL()+path, rd)
 	if err != nil {
 		return 0, nil, 0, &QueryResult{ErrorKind: "network_error", Message: err.Error()}
 	}
-	if form != nil {
-		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
 	}
 	req.Header.Set("Accept", "application/json")
 	if c.Token != "" {
@@ -210,7 +215,7 @@ func (c *LogBotClient) relogin(ctx context.Context) *QueryResult {
 // call 执行一次带鉴权的业务请求；登录模式下 401/重定向时加锁重登一次并重试原请求。
 // 每次实际发出的 HTTP 请求通过 record 回调记录（状态、耗时、网络层错误），
 // 由调用方在完成状态映射/任务判定后统一写审计（错误类型以映射结果为准）。
-func (c *LogBotClient) call(ctx context.Context, method, path string, form url.Values, record func(status int, dur time.Duration, errKind string)) (int, []byte, *QueryResult) {
+func (c *LogBotClient) call(ctx context.Context, method, path string, body []byte, contentType string, record func(status int, dur time.Duration, errKind string)) (int, []byte, *QueryResult) {
 	if c.Token == "" {
 		if fail := c.ensureSession(ctx); fail != nil {
 			return 0, nil, fail
@@ -218,7 +223,7 @@ func (c *LogBotClient) call(ctx context.Context, method, path string, form url.V
 	}
 	retried := false
 	for {
-		status, body, dur, fail := c.rawDo(ctx, method, path, form)
+		status, raw, dur, fail := c.rawDo(ctx, method, path, body, contentType)
 		errKind := ""
 		if fail != nil {
 			errKind = fail.ErrorKind
@@ -240,7 +245,7 @@ func (c *LogBotClient) call(ctx context.Context, method, path string, form url.V
 			}
 			continue
 		}
-		return status, body, nil
+		return status, raw, nil
 	}
 }
 
@@ -313,39 +318,67 @@ func logbotDetail(body []byte) string {
 	switch v := parsed.Detail.(type) {
 	case string:
 		return strings.TrimSpace(v)
+	case []any:
+		// FastAPI 校验错误是对象列表；只取每条 msg，丢弃 input 等可能回显的内容。
+		msgs := make([]string, 0, len(v))
+		for _, item := range v {
+			if m, ok := item.(map[string]any); ok {
+				if msg, ok := m["msg"].(string); ok && strings.TrimSpace(msg) != "" {
+					msgs = append(msgs, strings.TrimSpace(msg))
+				}
+			}
+		}
+		return strings.Join(msgs, "; ")
 	default:
 		return ""
 	}
 }
 
-type logbotJob struct {
-	JobID   string `json:"job_id"`
-	Status  string `json:"status"`
-	Error   string `json:"error"`
-	Message string `json:"message"`
-	Result  *struct {
-		Data        []map[string]any              `json:"data"`
-		Sources     map[string]logbotSourceStatus `json:"sources"`
-		ScanEndTime string                        `json:"scan_end_time"`
-	} `json:"result"`
+// ── agent API 请求/响应结构 ──────────────────────────────────────────
+
+// logbotAgentRequest 是 POST /api/agent/log-query/jobs 的 JSON 请求体。
+// start_time/end_time 为无时区上海本地时间 "YYYY-MM-DD HH:MM:SS"，区间 [start,end)。
+type logbotAgentRequest struct {
+	QueryType    string         `json:"query_type"`
+	PlatformMode string         `json:"platform_mode,omitempty"`
+	StartTime    string         `json:"start_time"`
+	EndTime      string         `json:"end_time"`
+	Filters      map[string]any `json:"filters,omitempty"`
+	LogSources   []string       `json:"log_sources,omitempty"`
+	PageSize     int            `json:"page_size,omitempty"`
+	MaxResults   int            `json:"max_results,omitempty"`
+	Purpose      string         `json:"purpose"`
 }
 
-type logbotSourceStatus struct {
-	Status         string `json:"status"`
-	Loaded         int    `json:"loaded"`
-	Error          string `json:"error"`
-	ScannedThrough string `json:"scanned_through"`
-	CoveredFrom    string `json:"covered_from"`
+type logbotAgentJob struct {
+	JobID       string `json:"job_id"`
+	Status      string `json:"status"`
+	Error       string `json:"error"`
+	Message     string `json:"message"`
+	ResultCount *int   `json:"result_count"`
 }
 
+type logbotAgentResults struct {
+	Status            string           `json:"status"`
+	Rows              []map[string]any `json:"rows"`
+	TotalCount        int              `json:"total_count"`
+	LimitsApplied     map[string]any   `json:"limits_applied"`
+	NextPageToken     string           `json:"next_page_token"`
+	SnapshotTruncated bool             `json:"snapshot_truncated"`
+	RetainedWindow    map[string]any   `json:"retained_window"`
+}
+
+// logbotJobResult 是一次（可能跨多个时间窗分段的）agent 查询的归并结果。
 type logbotJobResult struct {
-	Data    []map[string]any
-	Sources map[string]logbotSourceStatus
+	Rows       []map[string]any
+	Total      int  // 各分段 total_count 之和（明细模式下为去重后行数）
+	TotalExact bool // 快照未截断、全部分段完成时才为真
+	Truncated  bool // 任一分段 snapshot_truncated 或命中行上限
 }
 
-var logbotKnownSources = map[string]bool{"DA": true, "MTA": true, "PROXYSVR": true, "webadmin": true}
+var logbotKnownSources = map[string]bool{"DA": true, "MTA": true, "PROXYSVR": true, "webadmin": true, "user_operation": true}
 
-var logbotKnownStatuses = map[string]bool{"complete": true, "limit": true, "partial": true, "queued": true, "running": true, "failed": true, "expired": true, "skipped_future": true}
+var logbotKnownStatuses = map[string]bool{"success": true, "queued": true, "running": true, "failed": true, "expired": true, "canceled": true}
 
 // safeSourceName 只放行白名单来源名，其余一律记为 unknown，避免上游反射内容进入审计/响应。
 func safeSourceName(name string) string {
@@ -363,18 +396,6 @@ func safeSourceStatus(status string) string {
 	return "unknown"
 }
 
-func sourceStatusSummary(sources map[string]logbotSourceStatus) string {
-	if len(sources) == 0 {
-		return ""
-	}
-	parts := make([]string, 0, len(sources))
-	for name, st := range sources {
-		parts = append(parts, safeSourceName(name)+"="+safeSourceStatus(st.Status))
-	}
-	sort.Strings(parts)
-	return strings.Join(parts, ",")
-}
-
 // logbotAttempt 记录一次实际发出的 HTTP 请求，用于事后统一写审计。
 type logbotAttempt struct {
 	status  int
@@ -383,7 +404,7 @@ type logbotAttempt struct {
 }
 
 // emitAttempts 在 HTTP 状态映射与任务判定之后写审计：每次请求一条，
-// 最后一条带上映射后的错误类型（403/429/4xx/5xx、失败任务、来源失败等）。
+// 最后一条带上映射后的错误类型（403/429/4xx/5xx、失败任务等）。
 func emitAttempts(ctx context.Context, stage, src, jobID, srcStatus, finalKind string, attempts []logbotAttempt) {
 	rec := auditlog.From(ctx)
 	if rec == nil {
@@ -403,12 +424,15 @@ func emitAttempts(ctx context.Context, stage, src, jobID, srcStatus, finalKind s
 	}
 }
 
-// submitJob 提交 query-jobs 表单，返回 job_id。
-// 403/400/409/422 的说明以固定中文文本加 HTTP 状态为主，上游 detail 仅作脱敏后的附加信息。
-func (c *LogBotClient) submitJob(ctx context.Context, form url.Values, sources []string) (string, *QueryResult) {
+// submitJob 提交 agent 查询任务，返回 job_id。成功响应为 HTTP 202。
+func (c *LogBotClient) submitJob(ctx context.Context, req logbotAgentRequest, sources []string) (string, *QueryResult) {
 	src := strings.Join(sources, ",")
+	payload, err := json.Marshal(req)
+	if err != nil {
+		return "", &QueryResult{ErrorKind: "upstream_error", Message: "LogBot 请求序列化失败"}
+	}
 	var attempts []logbotAttempt
-	status, body, fail := c.call(ctx, http.MethodPost, "/api/query-jobs", form, func(st int, dur time.Duration, errKind string) {
+	status, body, fail := c.call(ctx, http.MethodPost, "/api/agent/log-query/jobs", payload, "application/json", func(st int, dur time.Duration, errKind string) {
 		attempts = append(attempts, logbotAttempt{status: st, dur: dur, errKind: errKind})
 	})
 	kind := ""
@@ -417,7 +441,7 @@ func (c *LogBotClient) submitJob(ctx context.Context, form url.Values, sources [
 	switch {
 	case fail != nil:
 		kind, result = fail.ErrorKind, fail
-	case status == http.StatusOK:
+	case status == http.StatusAccepted || status == http.StatusOK:
 		var parsed struct {
 			JobID string `json:"job_id"`
 		}
@@ -429,7 +453,6 @@ func (c *LogBotClient) submitJob(ctx context.Context, form url.Values, sources [
 	case status == http.StatusUnauthorized || isRedirectStatus(status):
 		kind, result = "auth_error", &QueryResult{ErrorKind: "auth_error", Message: fmt.Sprintf("LogBot 鉴权失败：HTTP %d", status)}
 	case status == http.StatusForbidden:
-		// 实测：暂停提供的日志类型返回 403「该日志类型暂停提供查询和导出」。
 		msg := "LogBot 拒绝该查询（HTTP 403）：该日志类型或来源可能暂不支持查询，或当前账号无该来源权限"
 		if d := sanitizeUpstreamText(logbotDetail(body), c.secrets()); d != "" {
 			msg += "；上游说明：" + d
@@ -438,13 +461,7 @@ func (c *LogBotClient) submitJob(ctx context.Context, form url.Values, sources [
 	case status == http.StatusTooManyRequests:
 		kind, result = "rate_limited", &QueryResult{ErrorKind: "rate_limited", Message: "LogBot 限频（HTTP 429），请放慢提交频率稍后重试"}
 	case status == http.StatusBadRequest, status == http.StatusUnprocessableEntity:
-		msg := fmt.Sprintf("LogBot 拒绝查询表单（HTTP %d）：请检查时间范围和筛选组合", status)
-		if d := sanitizeUpstreamText(logbotDetail(body), c.secrets()); d != "" {
-			msg += "；上游说明：" + d
-		}
-		kind, result = "upstream_error", &QueryResult{ErrorKind: "upstream_error", Message: msg}
-	case status == http.StatusConflict:
-		msg := "LogBot 任务冲突（HTTP 409）：同条件活动任务仍在运行，请稍后重试"
+		msg := fmt.Sprintf("LogBot 拒绝查询请求（HTTP %d）：请检查时间范围（单任务上限 24h）和筛选组合", status)
 		if d := sanitizeUpstreamText(logbotDetail(body), c.secrets()); d != "" {
 			msg += "；上游说明：" + d
 		}
@@ -457,31 +474,29 @@ func (c *LogBotClient) submitJob(ctx context.Context, form url.Values, sources [
 }
 
 // getJob 轮询一次任务状态。HTTP 200 但任务到达失败终态时，审计同样带 upstream_error。
-func (c *LogBotClient) getJob(ctx context.Context, jobID string, sources []string) (*logbotJob, *QueryResult) {
+func (c *LogBotClient) getJob(ctx context.Context, jobID string, sources []string) (*logbotAgentJob, *QueryResult) {
 	src := strings.Join(sources, ",")
 	var attempts []logbotAttempt
-	status, body, fail := c.call(ctx, http.MethodGet, "/api/query-jobs/"+url.PathEscape(jobID), nil, func(st int, dur time.Duration, errKind string) {
+	status, body, fail := c.call(ctx, http.MethodGet, "/api/agent/log-query/jobs/"+url.PathEscape(jobID), nil, "", func(st int, dur time.Duration, errKind string) {
 		attempts = append(attempts, logbotAttempt{status: st, dur: dur, errKind: errKind})
 	})
 	kind := ""
 	var result *QueryResult
-	var job logbotJob
+	var job logbotAgentJob
 	switch {
 	case fail != nil:
 		kind, result = fail.ErrorKind, fail
 	case status == http.StatusOK:
-		var parsed struct {
-			Job logbotJob `json:"job"`
-		}
-		if err := json.Unmarshal(body, &parsed); err != nil {
+		if err := json.Unmarshal(body, &job); err != nil {
 			kind, result = "upstream_error", &QueryResult{ErrorKind: "upstream_error", Message: "LogBot 任务响应解析失败"}
 			break
 		}
-		job = parsed.Job
 		if job.JobID == "" {
 			job.JobID = jobID
 		}
-		if job.Status != "" && job.Status != "queued" && job.Status != "running" && job.Status != "success" {
+		switch job.Status {
+		case "", "queued", "running", "success":
+		default:
 			kind = "upstream_error"
 		}
 	case status == http.StatusUnauthorized || isRedirectStatus(status):
@@ -495,44 +510,88 @@ func (c *LogBotClient) getJob(ctx context.Context, jobID string, sources []strin
 	default:
 		kind, result = "upstream_error", &QueryResult{ErrorKind: "upstream_error", Message: fmt.Sprintf("LogBot 轮询失败：HTTP %d", status)}
 	}
-	srcStatus := ""
-	if status == http.StatusOK {
-		srcStatus = sourceStatusSummaryOf(body)
-	}
-	emitAttempts(ctx, "poll", src, jobID, srcStatus, kind, attempts)
+	emitAttempts(ctx, "poll", src, jobID, safeSourceStatus(job.Status), kind, attempts)
 	if result != nil {
 		return nil, result
 	}
 	return &job, nil
 }
 
-// sourceStatusSummaryOf 尽力从轮询响应体提取来源状态用于审计；失败时返回空。
-func sourceStatusSummaryOf(body []byte) string {
-	var parsed struct {
-		Job struct {
-			Result *struct {
-				Sources map[string]logbotSourceStatus `json:"sources"`
-			} `json:"result"`
-		} `json:"job"`
+// fetchResults 按 page_token 翻页取回任务结果，直到游标耗尽或达到 maxRows。
+// 返回聚合后的结果；lastPage 记录最后一页的完整性标志。
+func (c *LogBotClient) fetchResults(ctx context.Context, jobID string, sources []string, maxRows int) (*logbotAgentResults, *QueryResult) {
+	src := strings.Join(sources, ",")
+	merged := &logbotAgentResults{Rows: []map[string]any{}}
+	pageToken := ""
+	for {
+		path := "/api/agent/log-query/jobs/" + url.PathEscape(jobID) + "/results?page_size=" + itoa(logbotResultsPageSize)
+		if pageToken != "" {
+			path += "&page_token=" + url.QueryEscape(pageToken)
+		}
+		var attempts []logbotAttempt
+		status, body, fail := c.call(ctx, http.MethodGet, path, nil, "", func(st int, dur time.Duration, errKind string) {
+			attempts = append(attempts, logbotAttempt{status: st, dur: dur, errKind: errKind})
+		})
+		kind := ""
+		var result *QueryResult
+		var page logbotAgentResults
+		switch {
+		case fail != nil:
+			kind, result = fail.ErrorKind, fail
+		case status == http.StatusOK:
+			if err := json.Unmarshal(body, &page); err != nil {
+				kind, result = "upstream_error", &QueryResult{ErrorKind: "upstream_error", Message: "LogBot 结果响应解析失败"}
+			}
+		case status == http.StatusUnauthorized || isRedirectStatus(status):
+			kind, result = "auth_error", &QueryResult{ErrorKind: "auth_error", Message: fmt.Sprintf("LogBot 鉴权失败：HTTP %d", status)}
+		case status == http.StatusNotFound:
+			kind, result = "upstream_error", &QueryResult{ErrorKind: "upstream_error", Message: "LogBot 任务结果不存在或已清理（HTTP 404）"}
+		case status == http.StatusTooManyRequests:
+			kind, result = "rate_limited", &QueryResult{ErrorKind: "rate_limited", Message: "LogBot 限频（HTTP 429），请放慢提交频率稍后重试"}
+		default:
+			kind, result = "upstream_error", &QueryResult{ErrorKind: "upstream_error", Message: fmt.Sprintf("LogBot 读取结果失败：HTTP %d", status)}
+		}
+		emitAttempts(ctx, "results", src, jobID, safeSourceStatus(page.Status), kind, attempts)
+		if result != nil {
+			return nil, result
+		}
+		merged.Rows = append(merged.Rows, page.Rows...)
+		merged.TotalCount = page.TotalCount
+		merged.LimitsApplied = page.LimitsApplied
+		merged.RetainedWindow = page.RetainedWindow
+		merged.SnapshotTruncated = merged.SnapshotTruncated || page.SnapshotTruncated
+		merged.Status = page.Status
+		pageToken = page.NextPageToken
+		if pageToken == "" || len(merged.Rows) >= maxRows {
+			break
+		}
 	}
-	if json.Unmarshal(body, &parsed) != nil || parsed.Job.Result == nil {
-		return ""
+	if len(merged.Rows) > maxRows {
+		merged.Rows = merged.Rows[:maxRows]
+		// maxRows==1 是 countOnly 模式：只取总数，截断不是上游截断语义。
+		if maxRows > 1 {
+			merged.SnapshotTruncated = true
+		}
 	}
-	return sourceStatusSummary(parsed.Job.Result.Sources)
+	return merged, nil
 }
 
-// runQuery 提交任务并轮询到终态；轮询总时长受操作预算（ctx 与 Timeout 的较小者）约束。
-func (c *LogBotClient) runQuery(ctx context.Context, form url.Values, sources []string) (*logbotJobResult, *QueryResult) {
+// runQuery 提交 agent 任务、轮询到终态并取回结果。
+// wantRows=false（countOnly）时只取一页结果拿 total_count，不翻页拉明细。
+// 轮询与取数总时长受操作预算（ctx 与 Timeout 的较小者）约束。
+func (c *LogBotClient) runQuery(ctx context.Context, req logbotAgentRequest, sources []string, maxRows int, wantRows bool) (*logbotJobResult, *QueryResult) {
 	timeout := c.timeout()
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	jobID, fail := c.submitJob(ctx, form, sources)
+	jobID, fail := c.submitJob(ctx, req, sources)
 	if fail != nil {
 		return nil, fail
 	}
 	interval := c.pollInterval()
+	var job *logbotAgentJob
 	for {
-		job, fail := c.getJob(ctx, jobID, sources)
+		var fail *QueryResult
+		job, fail = c.getJob(ctx, jobID, sources)
 		if fail != nil {
 			return nil, fail
 		}
@@ -540,11 +599,7 @@ func (c *LogBotClient) runQuery(ctx context.Context, form url.Values, sources []
 		case "queued", "running", "":
 			// 继续轮询
 		case "success":
-			if job.Result == nil {
-				return nil, &QueryResult{ErrorKind: "upstream_error", Message: "LogBot 任务成功但缺少 result"}
-			}
-			c.auditSourceOutcome(ctx, jobID, sources, job.Result.Sources)
-			return &logbotJobResult{Data: job.Result.Data, Sources: job.Result.Sources}, nil
+			goto DONE
 		default:
 			msg := strings.TrimSpace(job.Error)
 			if msg == "" {
@@ -552,7 +607,7 @@ func (c *LogBotClient) runQuery(ctx context.Context, form url.Values, sources []
 			}
 			msg = sanitizeUpstreamText(msg, c.secrets())
 			if msg == "" {
-				msg = "status=" + job.Status
+				msg = "status=" + safeSourceStatus(job.Status)
 			}
 			return nil, &QueryResult{ErrorKind: "upstream_error", Message: "LogBot 任务失败：" + msg}
 		}
@@ -571,84 +626,96 @@ func (c *LogBotClient) runQuery(ctx context.Context, form url.Values, sources []
 			interval = logbotMaxPollInterval
 		}
 	}
+DONE:
+	limit := maxRows
+	if limit <= 0 || limit > LogBotDisplayLimit {
+		limit = LogBotDisplayLimit
+	}
+	if !wantRows {
+		limit = 1
+	}
+	res, fail := c.fetchResults(ctx, jobID, sources, limit)
+	if fail != nil {
+		return nil, fail
+	}
+	c.auditJobOutcome(ctx, jobID, sources, res)
+	out := &logbotJobResult{Rows: res.Rows, Truncated: res.SnapshotTruncated, TotalExact: !res.SnapshotTruncated}
+	if wantRows {
+		out.Total = len(res.Rows)
+	} else {
+		out.Total = res.TotalCount
+	}
+	return out, nil
 }
 
-// auditSourceOutcome 在任务成功返回后补一条来源级审计：来源 failed/expired
-// 全部失败记 upstream_error，部分失败记 partial_failure，其余为正常结果快照。
-func (c *LogBotClient) auditSourceOutcome(ctx context.Context, jobID string, sources []string, got map[string]logbotSourceStatus) {
-	failed := 0
-	for _, name := range sources {
-		st, ok := got[name]
-		if !ok || st.Status == "failed" || st.Status == "expired" {
-			failed++
-		}
-	}
+// auditJobOutcome 在任务成功返回后补一条结果级审计快照。
+func (c *LogBotClient) auditJobOutcome(ctx context.Context, jobID string, sources []string, res *logbotAgentResults) {
 	kind := ""
-	switch {
-	case failed == len(sources) && len(sources) > 0:
-		kind = "upstream_error"
-	case failed > 0:
+	if res.SnapshotTruncated {
 		kind = "partial_failure"
 	}
 	if rec := auditlog.From(ctx); rec != nil {
 		rec.AddLogBot(auditlog.LogBotCall{
 			Stage: "result", Sources: strings.Join(sources, ","), JobID: jobID,
-			SourceStatus: sourceStatusSummary(got), ErrorKind: kind, OK: kind == "",
+			SourceStatus: safeSourceStatus(res.Status), ErrorKind: kind, OK: kind == "",
 		})
 	}
 }
 
-// assessSources 按 job.result.sources 逐来源判断完整性。
-// 返回的 QueryResult 填充 Total/Truncated/Partial/Limitations；所有来源都失败时返回 fail。
-// secrets 用于上游错误文本脱敏。
-func assessSources(sources []string, got map[string]logbotSourceStatus, total int, secrets []string) (QueryResult, *QueryResult) {
-	res := QueryResult{OK: true, Total: total}
-	var failed []string
-	for _, name := range sources {
-		st, ok := got[name]
-		if !ok {
-			failed = append(failed, safeSourceName(name)+"（无来源结果）")
+// logbotResultToQuery 把 agent 结果映射为 QueryResult：按 log_source 过滤、
+// 整行去重后映射 Entry；snapshot_truncated 映射为 Truncated+limitation，
+// DA 缺分组键的限制说明另计。TotalExact 为假时不标 eq，调用方据此
+// 区分「精确无记录」与「快照不完整」。
+func logbotResultToQuery(res *logbotJobResult, source string, countOnly bool, secrets []string) QueryResult {
+	var rows []map[string]any
+	seen := map[string]bool{}
+	for _, row := range res.Rows {
+		if rowSource := asString(row["log_source"]); rowSource != "" && !strings.EqualFold(rowSource, source) {
 			continue
 		}
-		name := safeSourceName(name)
-		switch st.Status {
-		case "complete":
-			// 该来源已查完，loaded=0 才能解释为无记录。
-		case "limit":
-			res.Truncated = true
-			res.Limitations = append(res.Limitations, "来源 "+name+" 已达展示上限（已加载 "+itoa(st.Loaded)+" 条），该时段内可能还有更多匹配记录；需要全量结果请缩小时间窗，或由人工走 LogBot 完整导出。")
-		case "partial", "queued", "running":
-			res.Partial = true
-			through := sanitizeUpstreamText(st.ScannedThrough, secrets)
-			note := "来源 " + name + " 仍有时段未扫描完成，当前结果不完整，这不等于「没有记录」"
-			if through != "" {
-				note += "；已扫描至 " + through
+		key := logbotRowKey(row, source)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		rows = append(rows, row)
+	}
+	unkeyed := 0
+	if source == logbotSourceDA {
+		rows, unkeyed = mergeLogbotDARows(rows)
+	}
+	var entries []Entry
+	if !countOnly {
+		entries = make([]Entry, 0, len(rows))
+		for _, row := range rows {
+			entries = append(entries, mapLogBotRow(row, source))
+		}
+		sortEntriesDesc(entries)
+	}
+	out := QueryResult{OK: true, Entries: entries}
+	if countOnly {
+		out.Total = res.Total
+	} else {
+		out.Total = len(rows)
+	}
+	if res.Truncated {
+		out.Truncated = true
+		out.Limitations = append(out.Limitations, "结果命中 LogBot 快照上限（单任务约 1000 行），该时段内可能还有更多匹配记录；需要全量结果请缩小时间窗。这不等于「没有记录」。")
+	}
+	if unkeyed > 0 {
+		out.Limitations = append(out.Limitations, "LogBot agent 接口的 DA 行不含 message-id（hdrmsgid）与投递关联键（commrefid），同一封邮件的多次投递动作无法归并，已按行逐条保留；条数不代表邮件封数。")
+	}
+	if source == logbotSourceDA {
+		for _, row := range rows {
+			if strings.TrimSpace(asString(row["cmd"])) == "" {
+				out.Limitations = append(out.Limitations, "LogBot agent 接口的 DA 行不含 cmd 列，无法区分投递动作类型（local/remote/antivirus），投递状态保持 unknown 不臆断。")
+				break
 			}
-			res.Limitations = append(res.Limitations, note+"。")
-		case "failed", "expired":
-			errMsg := sanitizeUpstreamText(st.Error, secrets)
-			if errMsg == "" {
-				errMsg = safeSourceStatus(st.Status)
-			}
-			failed = append(failed, name+"（"+errMsg+"）")
-		case "skipped_future":
-			// 未来时段未扫描，与 partial 一样不能解释为「精确无记录」。
-			res.Partial = true
-			res.Limitations = append(res.Limitations, "来源 "+name+"：查询时段在未来，LogBot 跳过读取；该时段尚未扫描，不能据此断言没有记录。")
-		default:
-			failed = append(failed, name+"（未知来源状态 "+safeSourceStatus(st.Status)+"）")
 		}
 	}
-	if len(failed) > 0 && len(failed) == len(sources) {
-		return QueryResult{}, &QueryResult{ErrorKind: "upstream_error", Message: "LogBot 所需来源全部失败：" + strings.Join(failed, "；")}
+	out.TotalExact = res.TotalExact && !out.Truncated
+	if out.TotalExact {
+		out.TotalRelation = "eq"
 	}
-	for _, f := range failed {
-		res.Partial = true
-		res.Limitations = append(res.Limitations, "来源 "+f+" 查询失败，该来源记录缺失是「未查到」而非「无记录」。")
-	}
-	res.TotalExact = !res.Truncated && !res.Partial
-	if res.TotalExact {
-		res.TotalRelation = "eq"
-	}
-	return res, nil
+	return out
 }

@@ -38,55 +38,31 @@ func lastCall(calls []auditlog.LogBotCall, stage string) auditlog.LogBotCall {
 	return auditlog.LogBotCall{}
 }
 
-// Fix 2：skipped_future 必须标记不精确（Partial=true、TotalExact=false）。
-func TestSkippedFutureIsNotExact(t *testing.T) {
+// 快照截断必须标记不精确（Truncated=true、TotalExact=false）。
+func TestTruncatedIsNotExact(t *testing.T) {
 	f := newLogbotFake(t)
-	f.sources = map[string]map[string]any{"DA": {"status": "skipped_future", "loaded": 0}}
+	f.truncated = true
 	res, _ := queryWithAudit(t, f)
 	if !res.OK {
 		t.Fatalf("%+v", res)
 	}
-	if !res.Partial || res.TotalExact {
-		t.Fatalf("skipped_future must be partial and inexact: %+v", res)
+	if !res.Truncated || res.TotalExact {
+		t.Fatalf("truncated snapshot must be inexact: %+v", res)
 	}
 	joined := strings.Join(res.Limitations, "\n")
-	if !strings.Contains(joined, "在未来") || !strings.Contains(joined, "不能据此断言没有记录") {
+	if !strings.Contains(joined, "快照上限") {
 		t.Fatalf("lim=%v", res.Limitations)
 	}
 }
 
-// Fix 5：expired 来源；以及 complete+limit+failed 多来源混合。
-func TestExpiredAndMixedSources(t *testing.T) {
-	// 单来源 expired → 全部失败 → error。
-	_, fail := assessSources([]string{"MTA"}, map[string]logbotSourceStatus{
-		"MTA": {Status: "expired", Error: "retention exceeded"},
-	}, 0, nil)
-	if fail == nil || fail.ErrorKind != "upstream_error" || !strings.Contains(fail.Message, "retention exceeded") {
-		t.Fatalf("expired: %+v", fail)
-	}
-	// 混合：DA complete、MTA limit、PROXYSVR failed → 有数据但截断+部分失败，不是整体错误。
-	res, fail := assessSources([]string{"DA", "MTA", "PROXYSVR"}, map[string]logbotSourceStatus{
-		"DA":       {Status: "complete", Loaded: 3},
-		"MTA":      {Status: "limit", Loaded: 1000},
-		"PROXYSVR": {Status: "failed", Error: "disk full"},
-	}, 1003, nil)
-	if fail != nil {
-		t.Fatalf("mixed sources must not fail wholly: %+v", fail)
-	}
-	if !res.Truncated || !res.Partial || res.TotalExact {
-		t.Fatalf("mixed: %+v", res)
-	}
-	joined := strings.Join(res.Limitations, "\n")
-	if !strings.Contains(joined, "展示上限") || !strings.Contains(joined, "disk full") || !strings.Contains(joined, "未查到") {
-		t.Fatalf("lim=%v", res.Limitations)
-	}
-	// 全部失败（failed+expired）→ error。
-	_, fail = assessSources([]string{"DA", "MTA"}, map[string]logbotSourceStatus{
-		"DA":  {Status: "failed", Error: "x"},
-		"MTA": {Status: "expired", Error: "y"},
-	}, 0, nil)
-	if fail == nil || fail.ErrorKind != "upstream_error" {
-		t.Fatalf("all failed: %+v", fail)
+// 上游任务失败 → upstream_error，含脱敏后的上游说明。
+func TestJobFailedIsUpstreamError(t *testing.T) {
+	f := newLogbotFake(t)
+	f.jobStatuses = []string{"failed"}
+	f.jobError = "disk full"
+	res, _ := queryWithAudit(t, f)
+	if res.OK || !strings.Contains(res.Message, "disk full") {
+		t.Fatalf("%+v", res)
 	}
 }
 
@@ -124,26 +100,23 @@ func TestAuditPollFailedJobAndFailedSources(t *testing.T) {
 		t.Fatalf("failed job poll audit: %+v", c)
 	}
 
-	// 来源部分失败 → result 审计 partial_failure；全部失败 → upstream_error。
+	// 结果端点 404 → results 审计 upstream_error。
 	f = newLogbotFake(t)
-	f.sources = map[string]map[string]any{"DA": {"status": "failed", "error": "unit source error"}}
+	f.resultsStatus = http.StatusNotFound
 	_, calls = queryWithAudit(t, f)
-	c = lastCall(calls, "result")
-	if c.ErrorKind != "upstream_error" || c.SourceStatus != "DA=failed" {
-		t.Fatalf("all-failed result audit: %+v", c)
+	c = lastCall(calls, "results")
+	if c.ErrorKind != "upstream_error" || c.HTTPStatus != 404 || c.OK {
+		t.Fatalf("results error audit: %+v", c)
 	}
 }
 
 func TestAuditPartialFailureKind(t *testing.T) {
-	// 通过 backend 混合来源只能构造单来源任务，这里直接验证 auditSourceOutcome。
+	// 快照截断 → result 审计 partial_failure。
 	f := newLogbotFake(t)
 	c := f.client()
 	rec := &auditlog.Record{}
 	ctx := auditlog.WithRecord(context.Background(), rec)
-	c.auditSourceOutcome(ctx, "j1", []string{"DA", "MTA"}, map[string]logbotSourceStatus{
-		"DA":  {Status: "complete", Loaded: 1},
-		"MTA": {Status: "failed", Error: "unit err"},
-	})
+	c.auditJobOutcome(ctx, "j1", []string{"DA"}, &logbotAgentResults{Status: "success", SnapshotTruncated: true, TotalCount: 1000})
 	raw := rec.Marshal()
 	var parsed struct {
 		Calls []auditlog.LogBotCall `json:"logbot_calls"`
@@ -198,14 +171,15 @@ func TestUpstreamTextSanitized(t *testing.T) {
 		t.Fatalf("job error leaks: %s", raw)
 	}
 
-	// 限长与来源 error 脱敏。
+	// 限长与任务 error 脱敏。
 	long := strings.Repeat("x", 500) + " unit-svc-password " + strings.Repeat("y", 500)
 	f = newLogbotFake(t)
-	f.sources = map[string]map[string]any{"DA": {"status": "failed", "error": long}}
+	f.jobStatuses = []string{"failed"}
+	f.jobError = long
 	out = NewLogBotService(f.client()).QuerySelfServiceDelivery(context.Background(), testInput())
 	joined = strings.Join(out.Limitations, "\n")
 	if strings.Contains(joined, "unit-svc-password") {
-		t.Fatalf("source error leaks: %v", out.Limitations)
+		t.Fatalf("job error leaks: %v", out.Limitations)
 	}
 	if len([]rune(joined)) > 300 {
 		t.Fatalf("not truncated: %d runes", len([]rune(joined)))
@@ -229,21 +203,16 @@ func TestFormRejectionUsesFixedMessage(t *testing.T) {
 		if strings.Contains(joined, "unit-svc-password") {
 			t.Fatalf("%d: leaked: %v", status, out.Limitations)
 		}
-		// 固定说明在前，上游附加在后。
-		if strings.Index(joined, "HTTP "+itoa(status)) > strings.Index(joined, "上游说明") && strings.Contains(joined, "上游说明") {
-			t.Fatalf("%d: fixed text must lead: %v", status, out.Limitations)
-		}
 	}
 }
 
-// Fix 7：DA 行缺 tid 且缺 message-id 时，必须提示同一封邮件可能拆成多行（不自行认定可接受）。
+// agent 接口的 DA 行无分组键：必须提示同一封邮件可能拆成多行（不自行认定可接受）。
 func TestLogBotDASplitRiskLimitation(t *testing.T) {
 	f := newLogbotFake(t)
 	f.rows = []map[string]any{
-		daRow("2026-08-01 10:00:01+08:00", "sender@example.com", "peer@example.com", "local", "0", "1", nil),
-		daRow("2026-08-01 10:00:02+08:00", "sender@example.com", "peer@example.com", "remote", "0", "", nil),
+		daRow("2026-08-01 10:00:01+08:00", "sender@example.com", "peer@example.com", "0"),
+		daRow("2026-08-01 10:00:02+08:00", "sender@example.com", "peer@example.com", "0"),
 	}
-	f.sources = map[string]map[string]any{"DA": {"status": "complete", "loaded": 2}}
 	out := f.service().QuerySelfServiceDelivery(context.Background(), testInput())
 	if out.Status != "ok" {
 		t.Fatalf("%+v", out)
@@ -252,12 +221,11 @@ func TestLogBotDASplitRiskLimitation(t *testing.T) {
 	if !strings.Contains(joined, "分行显示") {
 		t.Fatalf("split-risk limitation missing: %v", out.Limitations)
 	}
-	// 有 hdrmsgid 时不应出现该提示。
+	// 有分组键（otherlog.hdrmsgid）时不应出现该提示。
+	keyed := daRow("2026-08-01 10:00:01+08:00", "sender@example.com", "peer@example.com", "0")
+	keyed["otherlog"] = map[string]any{"hdrmsgid": "<u1@example.com>"}
 	f2 := newLogbotFake(t)
-	f2.rows = []map[string]any{
-		daRow("2026-08-01 10:00:01+08:00", "sender@example.com", "peer@example.com", "remote", "0", "", map[string]any{"hdrmsgid": "<u1@example.com>"}),
-	}
-	f2.sources = map[string]map[string]any{"DA": {"status": "complete", "loaded": 1}}
+	f2.rows = []map[string]any{keyed}
 	out2 := f2.service().QuerySelfServiceDelivery(context.Background(), testInput())
 	if strings.Contains(strings.Join(out2.Limitations, "\n"), "分行显示") {
 		t.Fatalf("false positive split-risk: %v", out2.Limitations)

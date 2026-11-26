@@ -1,6 +1,7 @@
 package cklogs
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -171,43 +172,33 @@ func TestLogBotKibanaFieldParity(t *testing.T) {
 	}
 }
 
-func TestLogBotDACmdFilterAndDedupe(t *testing.T) {
+// agent 接口实测返回完全重复的行：整行去重；无分组键的 DA 行逐条保留。
+func TestLogBotDADedupeWholeRows(t *testing.T) {
 	rows := []map[string]any{
-		daRow("2026-08-01 10:00:00+08:00", "a@unit-a.test", "b@unit-b.test", "antivirus", "0", "", nil),
-		daRow("2026-08-01 10:00:00+08:00", "a@unit-a.test", "b@unit-b.test", "", "0", "", nil),
-		daRow("2026-08-01 10:00:01+08:00", "a@unit-a.test", "b@unit-b.test", "local", "0", "1", nil),
-		daRow("2026-08-01 10:00:01+08:00", "a@unit-a.test", "b@unit-b.test", "local", "0", "1", nil),
-		daRow("2026-08-01 10:00:02+08:00", "a@unit-a.test", "b@unit-b.test", "remote", "0", "", nil),
+		daRow("2026-08-01 10:00:00+08:00", "a@unit-a.test", "b@unit-b.test", "0"),
+		daRow("2026-08-01 10:00:00+08:00", "a@unit-a.test", "b@unit-b.test", "0"),
+		daRow("2026-08-01 10:00:01+08:00", "a@unit-a.test", "b@unit-b.test", "0"),
+		daRow("2026-08-01 10:00:02+08:00", "a@unit-a.test", "b@unit-b.test", "0"),
 	}
-	res := &logbotJobResult{
-		Data:    rows,
-		Sources: map[string]logbotSourceStatus{"DA": {Status: "complete", Loaded: 5}},
-	}
+	res := &logbotJobResult{Rows: rows, Total: len(rows), TotalExact: true}
 	out := logbotResultToQuery(res, "DA", false, nil)
 	if !out.OK || !out.TotalExact {
 		t.Fatalf("%+v", out)
 	}
-	if out.Total != 2 || len(out.Entries) != 2 {
-		t.Fatalf("antivirus/汇总行须过滤、重复行须去重: total=%d entries=%d", out.Total, len(out.Entries))
+	if out.Total != 3 || len(out.Entries) != 3 {
+		t.Fatalf("完全重复行须去重、不同行须保留: total=%d entries=%d", out.Total, len(out.Entries))
 	}
-	cmds := map[string]bool{}
-	for _, e := range out.Entries {
-		cmds[e.Cmd] = true
-	}
-	if !cmds["local"] || !cmds["remote"] {
-		t.Fatalf("cmds=%v", cmds)
+	if !strings.Contains(strings.Join(out.Limitations, "\n"), "无法归并") {
+		t.Fatalf("unkeyed limitation missing: %v", out.Limitations)
 	}
 }
 
 func TestLogBotResultIgnoresForeignSourceRows(t *testing.T) {
 	rows := []map[string]any{
-		daRow("2026-08-01 10:00:01+08:00", "a@unit-a.test", "b@unit-b.test", "local", "0", "1", nil),
+		daRow("2026-08-01 10:00:01+08:00", "a@unit-a.test", "b@unit-b.test", "0"),
 		{"timestamp": "2026-08-01 10:00:02+08:00", "sender": "a@unit-a.test", "cmd": "DATA", "log_source": "MTA"},
 	}
-	res := &logbotJobResult{
-		Data:    rows,
-		Sources: map[string]logbotSourceStatus{"DA": {Status: "complete", Loaded: 2}},
-	}
+	res := &logbotJobResult{Rows: rows, Total: len(rows), TotalExact: true}
 	out := logbotResultToQuery(res, "DA", false, nil)
 	if out.Total != 1 || len(out.Entries) != 1 || out.Entries[0].Source != "da" {
 		t.Fatalf("%+v", out)

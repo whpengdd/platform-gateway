@@ -28,8 +28,9 @@ func daGroupTestRow(cmd, to, hdr, cref, result, ts string) map[string]any {
 
 func daGroupTestResult(rows []map[string]any) QueryResult {
 	return logbotResultToQuery(&logbotJobResult{
-		Data:    rows,
-		Sources: map[string]logbotSourceStatus{"DA": {Status: "complete", Loaded: len(rows)}},
+		Rows:       rows,
+		Total:      len(rows),
+		TotalExact: true,
 	}, logbotSourceDA, false, nil)
 }
 
@@ -133,16 +134,14 @@ func TestDAGroupKeepsPeersSeparate(t *testing.T) {
 	}
 }
 
-// countOnly：合并后的行数作为计数基准，且非 DA 来源不受影响。
+// countOnly：total 取上游 total_count（未拉明细、不做归并），entries 恒空。
 func TestDAGroupCountOnly(t *testing.T) {
 	res := logbotResultToQuery(&logbotJobResult{
-		Data: []map[string]any{
-			daGroupTestRow("remote", "r1@example.test", "<m1@test>", "c1", "0", "2026-01-01 10:00:00+08:00"),
-			daGroupTestRow("local", "r1@example.test", "<m1@test>", "c1", "0", "2026-01-01 10:00:00+08:00"),
-		},
-		Sources: map[string]logbotSourceStatus{"DA": {Status: "complete", Loaded: 2}},
+		Rows:       []map[string]any{daGroupTestRow("remote", "r1@example.test", "<m1@test>", "c1", "0", "2026-01-01 10:00:00+08:00")},
+		Total:      2,
+		TotalExact: true,
 	}, logbotSourceDA, true, nil)
-	if res.Total != 1 || len(res.Entries) != 0 {
+	if res.Total != 2 || len(res.Entries) != 0 {
 		t.Fatalf("countOnly: total=%d entries=%d", res.Total, len(res.Entries))
 	}
 }

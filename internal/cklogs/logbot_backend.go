@@ -2,16 +2,17 @@ package cklogs
 
 import (
 	"context"
-	"net/url"
 	"strings"
 	"time"
 
 	"platform-gateway/internal/auditlog"
 )
 
-// LogBotBackend 把 LogBot 异步任务 API 包装成 Backend。
-// 支持 DA/MTA/PROXYSVR 三个 transmission 来源；dasvr 投递流水、登录/操作日志、
-// 按 tid/msgId 筛选在 LogBot 上不可用，返回 ErrorKind="not_available"。
+// LogBotBackend 把 LogBot agent 异步任务 API 包装成 Backend。
+// 支持 DA/MTA/PROXYSVR 三个 transmission 来源；dasvr 投递流水、登录日志、
+// 按 tid 筛选在 LogBot 上不可用，返回 ErrorKind="not_available"。
+// msgId 仅在 DA 来源经 mid 筛选支持，其余来源按 not_available 处理。
+// agent API 单任务时间窗上限 24h，更长窗口在本层切分串行提交后合并。
 type LogBotBackend struct {
 	Client *LogBotClient
 }
@@ -65,40 +66,49 @@ func (b LogBotBackend) Query(ctx context.Context, filters Filters, opts QueryOpt
 	if !b.Configured() {
 		return b.notConfigured()
 	}
-	if filters.MsgID != "" || filters.Tid != "" {
-		// 实测：LogBot 没有 tid/msgId 筛选（mid 仅 DA 支持且与 Kibana tid 不同义）。
-		return QueryResult{ErrorKind: "not_available", Message: "LogBot 暂不支持按 tid/msgId 筛选，无法执行该查询；这不等于「没有记录」，请改用发件人/收件人/主题/时间窗条件。"}
+	if filters.Tid != "" {
+		return QueryResult{ErrorKind: "not_available", Message: "LogBot 不提供 tid 列也不支持按 tid 筛选，无法执行该查询；这不等于「没有记录」，请改用发件人/收件人/主题/时间窗条件。"}
+	}
+	msgID := strings.TrimSpace(filters.MsgID)
+	if msgID != "" && source != logbotSourceDA {
+		return QueryResult{ErrorKind: "not_available", Message: "LogBot 的 msgId 筛选（mid）仅投递日志（DA）来源可用，当前查询来源不支持；这不等于「没有记录」。"}
 	}
 	domain := strings.ToLower(strings.TrimSpace(filters.Domain))
-	buildForm := func(fromAddr, toAddr string) url.Values {
-		form := url.Values{}
-		form.Set("query_type", "transmission")
-		form.Set("start_time", logbotFormTime(filters.TimeRange.FromMs))
-		// LogBot 起止时间为秒精度且含两端；Kibana 语义是 [from, to)，故终点回退 1ms。
-		endMs := filters.TimeRange.ToMs - 1
-		if endMs < filters.TimeRange.FromMs {
-			endMs = filters.TimeRange.FromMs
+	buildReq := func(fromAddr, toAddr string, fromMs, toMs int64) logbotAgentRequest {
+		req := logbotAgentRequest{
+			QueryType: "transmission",
+			StartTime: logbotFormTime(fromMs),
+			// agent 区间为 [start,end)；Kibana 语义也是 [from, to)，终点回退 1ms。
+			EndTime:    logbotFormTime(toMs - 1),
+			LogSources: []string{source},
+			Purpose:    "platform-gateway cklogs " + opts.Dataset,
 		}
-		form.Set("end_time", logbotFormTime(endMs))
-		form.Add("log_source[]", source)
+		if req.EndTime < req.StartTime {
+			req.EndTime = req.StartTime
+		}
+		f := map[string]any{}
 		if fromAddr != "" {
-			form.Set("from_addr", fromAddr)
+			f["from_addr"] = fromAddr
 		}
 		if toAddr != "" {
-			form.Set("to_addr", toAddr)
+			f["to_addr"] = toAddr
 		}
-		// 实测 subject 筛选适用于 DA/MTA；PROXYSVR 不推送，由本地过滤兜底。
+		if msgID != "" {
+			f["mid"] = msgID
+		}
+		// 实测 subject 筛选适用于 DA/MTA；PROXYSVR 侧效果未验证，保持不推、由服务层过滤兜底。
 		if filters.Subject != "" && source != logbotSourceProxy {
-			form.Set("subject", filters.Subject)
+			f["subject"] = filters.Subject
 		}
 		if domain != "" {
 			// 域名只能带在邮箱字段中；未映射的域名需要 platform_mode=all，否则 0 命中。
-			form.Set("platform_mode", "all")
+			req.PlatformMode = "all"
 		}
-		return form
+		req.Filters = f
+		return req
 	}
 	// 域名查询（实测语义）：from_addr/to_addr 填裸域名时按地址的域名部分精确匹配
-	// （不是子串/后缀匹配），同一表单内两个地址字段是 AND 关系，无法表达
+	// （不是子串/后缀匹配），同一请求内两个地址字段是 AND 关系，无法表达
 	// 「发件人或收件人属于该域」的 OR；platform_mode=all 必须带上，否则未映射
 	// 到本平台的域名恒 0 命中。故按方向把域名落到 from_addr/to_addr，
 	// both 时发两个任务并在本地合并去重。
@@ -112,7 +122,7 @@ func (b LogBotBackend) Query(ctx context.Context, filters Filters, opts QueryOpt
 			if !toOK {
 				return emptyDomainResult()
 			}
-			return b.toQueryResult(b.runSingle(ctx, buildForm(filters.Sender, toAddr), source), source, opts)
+			return b.toQueryResult(b.runWindowed(ctx, buildReq, filters.Sender, toAddr, filters.TimeRange, source, opts), source, opts)
 		case "both":
 			// 一侧子句被另一侧完全包含时不必重复发任务：
 			// 显式发件人在域内时 to 侧结果是 from 侧子集，收件人同理。
@@ -126,14 +136,14 @@ func (b LogBotBackend) Query(ctx context.Context, filters Filters, opts QueryOpt
 			}
 			var runs []logbotRun
 			if runFrom {
-				run := b.runSingle(ctx, buildForm(fromAddr, filters.Recipient), source)
+				run := b.runWindowed(ctx, buildReq, fromAddr, filters.Recipient, filters.TimeRange, source, opts)
 				if run.fail != nil {
 					return *run.fail
 				}
 				runs = append(runs, run)
 			}
 			if runTo {
-				run := b.runSingle(ctx, buildForm(filters.Sender, toAddr), source)
+				run := b.runWindowed(ctx, buildReq, filters.Sender, toAddr, filters.TimeRange, source, opts)
 				if run.fail != nil {
 					return *run.fail
 				}
@@ -150,10 +160,10 @@ func (b LogBotBackend) Query(ctx context.Context, filters Filters, opts QueryOpt
 			if !fromOK {
 				return emptyDomainResult()
 			}
-			return b.toQueryResult(b.runSingle(ctx, buildForm(fromAddr, filters.Recipient), source), source, opts)
+			return b.toQueryResult(b.runWindowed(ctx, buildReq, fromAddr, filters.Recipient, filters.TimeRange, source, opts), source, opts)
 		}
 	}
-	return b.toQueryResult(b.runSingle(ctx, buildForm(filters.Sender, filters.Recipient), source), source, opts)
+	return b.toQueryResult(b.runWindowed(ctx, buildReq, filters.Sender, filters.Recipient, filters.TimeRange, source, opts), source, opts)
 }
 
 // domainSideAddr 计算域名查询某一侧的地址条件：无显式地址时用域名本身匹配
@@ -174,9 +184,32 @@ func emptyDomainResult() QueryResult {
 	return QueryResult{OK: true, Entries: []Entry{}, TotalExact: true, TotalRelation: "eq"}
 }
 
-func (b LogBotBackend) runSingle(ctx context.Context, form url.Values, source string) logbotRun {
-	res, fail := b.Client.runQuery(ctx, form, []string{source})
-	return logbotRun{result: res, fail: fail}
+// runWindowed 按 ≤24h 切分时间窗串行提交 agent 任务并合并结果。
+// 任一分段失败即返回错误（失败窗口行缺失，结果不能冒充完整）；
+// countOnly 时各分段只取 total_count。
+func (b LogBotBackend) runWindowed(ctx context.Context, buildReq func(fromAddr, toAddr string, fromMs, toMs int64) logbotAgentRequest, fromAddr, toAddr string, tr TimeRange, source string, opts QueryOptions) logbotRun {
+	merged := &logbotJobResult{TotalExact: true}
+	start := tr.FromMs
+	for {
+		end := tr.ToMs
+		if start+logbotAgentMaxWindow.Milliseconds() < end {
+			end = start + logbotAgentMaxWindow.Milliseconds()
+		}
+		req := buildReq(fromAddr, toAddr, start, end)
+		res, fail := b.Client.runQuery(ctx, req, []string{source}, LogBotDisplayLimit, !opts.CountOnly)
+		if fail != nil {
+			return logbotRun{fail: fail}
+		}
+		merged.Rows = append(merged.Rows, res.Rows...)
+		merged.Total += res.Total
+		merged.Truncated = merged.Truncated || res.Truncated
+		merged.TotalExact = merged.TotalExact && res.TotalExact
+		if end >= tr.ToMs {
+			break
+		}
+		start = end
+	}
+	return logbotRun{result: merged}
 }
 
 type logbotRun struct {
@@ -200,90 +233,29 @@ func (b LogBotBackend) toQueryResult(r logbotRun, source string, opts QueryOptio
 
 // mergeDomainResults 合并 both 方向的两个域名查询结果。
 func (b LogBotBackend) mergeDomainResults(outbound, inbound logbotRun, source string, opts QueryOptions) QueryResult {
-	merged := &logbotJobResult{
-		Sources: map[string]logbotSourceStatus{},
-	}
+	merged := &logbotJobResult{TotalExact: true}
 	seen := map[string]bool{}
 	for _, run := range []logbotRun{outbound, inbound} {
-		for _, row := range run.result.Data {
+		for _, row := range run.result.Rows {
 			key := logbotRowKey(row, source)
 			if seen[key] {
 				continue
 			}
 			seen[key] = true
-			merged.Data = append(merged.Data, row)
+			merged.Rows = append(merged.Rows, row)
 		}
-		for name, st := range run.result.Sources {
-			cur, ok := merged.Sources[name]
-			// 合并同一来源的两次执行：取较差的状态、loaded 取去重前的总和无意义，
-			// 以去重后的行数为准（在 logbotResultToQuery 中重算）。
-			if !ok || sourceStatusRank(st.Status) > sourceStatusRank(cur.Status) {
-				merged.Sources[name] = st
-			}
-		}
+		merged.Total += run.result.Total
+		merged.Truncated = merged.Truncated || run.result.Truncated
+		merged.TotalExact = merged.TotalExact && run.result.TotalExact
+	}
+	if opts.CountOnly {
+		// 两侧合计会重复计算重叠行，标注为不精确。
+		merged.TotalExact = false
 	}
 	return logbotResultToQuery(merged, source, opts.CountOnly, b.secrets())
 }
 
-func sourceStatusRank(status string) int {
-	switch status {
-	case "complete":
-		return 0
-	case "skipped_future":
-		return 1
-	case "limit":
-		return 2
-	case "partial", "queued", "running":
-		return 3
-	default: // failed/expired/unknown
-		return 4
-	}
-}
-
-// logbotResultToQuery 把任务结果映射为 QueryResult：DA 只取 cmd=local/remote 行并去重，
-// 再按投递分组键（hdrmsgid → commrefid → 单行）把同一次投递同一收件人的多行
-// 折成一条；行映射到 Entry，来源状态映射为 Truncated/Partial/Limitations。
-func logbotResultToQuery(res *logbotJobResult, source string, countOnly bool, secrets []string) QueryResult {
-	var rows []map[string]any
-	seen := map[string]bool{}
-	for _, row := range res.Data {
-		if rowSource := asString(row["log_source"]); rowSource != "" && !strings.EqualFold(rowSource, source) {
-			continue
-		}
-		if source == logbotSourceDA && !logbotDAMainCmd(row) {
-			continue
-		}
-		key := logbotRowKey(row, source)
-		if seen[key] {
-			continue
-		}
-		seen[key] = true
-		rows = append(rows, row)
-	}
-	unkeyed := 0
-	if source == logbotSourceDA {
-		rows, unkeyed = mergeLogbotDARows(rows)
-	}
-	var entries []Entry
-	if !countOnly {
-		entries = make([]Entry, 0, len(rows))
-		for _, row := range rows {
-			entries = append(entries, mapLogBotRow(row, source))
-		}
-		sortEntriesDesc(entries)
-	}
-	out, fail := assessSources([]string{source}, res.Sources, len(rows), secrets)
-	if fail != nil {
-		return *fail
-	}
-	if unkeyed > 0 {
-		out.Limitations = append(out.Limitations, "部分 DA 行缺少 message-id（hdrmsgid）与投递关联键（commrefid），无法归并到具体邮件，已按命令行逐条保留；同一收件人的多封此类邮件在结果中可能被聚为一条，条数不代表邮件封数。")
-	}
-	out.Entries = entries
-	return out
-}
-
-// logbotFormTime 按 Asia/Shanghai 输出 "YYYY-MM-DD HH:MM:SS"。
+// logbotFormTime 按 Asia/Shanghai 输出 agent API 要求的 "YYYY-MM-DD HH:MM:SS"。
 func logbotFormTime(ms int64) string {
 	return time.UnixMilli(ms).In(auditlog.Shanghai()).Format("2006-01-02 15:04:05")
 }
