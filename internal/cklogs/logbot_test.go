@@ -37,8 +37,11 @@ type logbotFake struct {
 	neverDone      bool     // 轮询恒为 running（预算耗尽测试）
 	jobError       string
 	rows           []map[string]any
-	truncated      bool // 结果快照标记 snapshot_truncated
-	totalCount     int  // 覆盖 total_count；-1 表示按匹配行数
+	jobRows        map[string][]map[string]any // 指定 job 专用行（多窗口差异场景）；未指定时回退 rows
+	truncated      bool                        // 结果快照标记 snapshot_truncated
+	truncatedJobs  map[string]bool             // 仅指定 job 的 snapshot_truncated（多窗口混合场景）
+	totalCount     int                         // 覆盖 total_count；-1 表示按匹配行数
+	totalCountJobs map[string]int              // 指定 job 的 total_count（优先级高于 totalCount）
 	jobs           map[string]map[string]any
 	nextJob        int
 }
@@ -155,6 +158,12 @@ func newLogbotFake(t *testing.T) *logbotFake {
 
 // matchedRowsLocked 返回该任务 log_sources 匹配的 fixture 行（调用时须持锁）。
 func (f *logbotFake) matchedRowsLocked(jobID string) []map[string]any {
+	if rows, ok := f.jobRows[jobID]; ok {
+		if rows == nil {
+			return []map[string]any{}
+		}
+		return rows
+	}
 	req := f.jobs[jobID]
 	var srcs []any
 	if l, ok := req["log_sources"].([]any); ok {
@@ -205,13 +214,17 @@ func (f *logbotFake) resultsLocked(w http.ResponseWriter, r *http.Request, jobID
 		next = "off-" + itoa(end)
 	}
 	total := f.totalCount
+	if jobTotal, ok := f.totalCountJobs[jobID]; ok {
+		total = jobTotal
+	}
 	if total < 0 {
 		total = len(matched)
 	}
+	truncated := f.truncated || f.truncatedJobs[jobID]
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"status": "success", "rows": page, "total_count": total,
 		"limits_applied": map[string]any{}, "next_page_token": next,
-		"snapshot_truncated": f.truncated, "retained_window": map[string]any{},
+		"snapshot_truncated": truncated, "retained_window": map[string]any{},
 	})
 }
 
@@ -459,20 +472,26 @@ func TestLogBotResultsEndpointError(t *testing.T) {
 	}
 }
 
-// countOnly 只取 total_count，不翻页拉明细。
+// countOnly 只取 total_count，不翻页拉明细；即使第一页后仍有游标，
+// maxRows==1 的计数语义也不能被 detail 的行上限截断逻辑污染。
 func TestLogBotCountOnlyUsesFilteredCount(t *testing.T) {
 	f := newLogbotFake(t)
-	f.rows = []map[string]any{
-		daRow("2026-08-01 10:00:01+08:00", "sender@example.com", "peer@example.com", "0"),
+	for i := 0; i < 101; i++ {
+		f.rows = append(f.rows, daRow("2026-08-01 10:00:01+08:00", "sender@example.com", "peer@example.com", "0"))
 	}
 	in := testInput()
 	in.CountOnly = true
 	out := f.service().QuerySelfServiceDelivery(context.Background(), in)
-	if out.Status != "ok" || out.Total == nil || *out.Total != 1 {
+	if out.Status != "ok" || out.Total == nil || *out.Total != 101 {
 		t.Fatalf("%+v", out)
 	}
 	if out.CountOnly == nil || !*out.CountOnly || len(out.Entries) != 0 {
 		t.Fatalf("%+v", out)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.resultCalls != 1 {
+		t.Fatalf("countOnly resultCalls=%d want 1 (no detail paging)", f.resultCalls)
 	}
 }
 

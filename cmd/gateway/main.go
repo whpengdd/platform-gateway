@@ -44,7 +44,7 @@ func main() {
 			// LogBot 未认证时会 302 到 SSO 登录页，必须禁止跟随重定向。
 			HTTPClient: newNoRedirectHTTPClient(cfg.lbTimeout),
 		}
-		ckService = cklogs.NewLogBotService(lb)
+		ckService = cklogs.NewLogBotServiceWithRequestTimeout(lb, cfg.ckTimeout)
 		ckReady = lb.Configured
 		log.Printf("cklogs provider: logbot (base_url configured=%t, auth configured=%t)", cfg.lbBase != "", lb.Configured())
 	} else {

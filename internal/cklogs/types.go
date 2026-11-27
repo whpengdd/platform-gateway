@@ -43,9 +43,16 @@ type QueryResult struct {
 	Total         int
 	ErrorKind     string
 	Message       string
+	// UpstreamTotal/FetchedRows/RowsIncomplete 仅 LogBot detail 链路填写：
+	// 前两者是上游 total_count 与实际取回原始行数的跨窗口合计（含重复行口径，
+	// 合计值只做展示不做完整性判断）；RowsIncomplete 按单个 job 逐段判定后 OR 累积，
+	// 避免跨窗正负差额相抵。Kibana 后端从不设置，行为不变。
+	UpstreamTotal  int
+	FetchedRows    int
+	RowsIncomplete bool
 	// 以下字段由 LogBot 后端按来源状态（limit/partial/failed/expired/skipped_future）
 	// 填写，用于诚实上报不完整结果；Kibana 后端从不设置，行为不变。
-	Truncated   bool     // 来源达到展示上限，条目只是前 N 条
+	Truncated   bool     // 结果不完整：来源达到展示上限、快照截断或部分命中行未取回
 	Partial     bool     // 来源仍有时段未扫描完成
 	Limitations []string // 需要透传给调用方的不完整说明
 }

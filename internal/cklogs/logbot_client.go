@@ -436,10 +436,13 @@ type logbotAgentResults struct {
 
 // logbotJobResult 是一次（可能跨多个时间窗分段的）agent 查询的归并结果。
 type logbotJobResult struct {
-	Rows       []map[string]any
-	Total      int  // 各分段 total_count 之和（明细模式下为去重后行数）
-	TotalExact bool // 快照未截断、全部分段完成时才为真
-	Truncated  bool // 任一分段 snapshot_truncated 或命中行上限
+	Rows           []map[string]any
+	Total          int  // countOnly 为各分段 total_count 之和；detail 为取回原始行数（最终展示前还会去重/归并）
+	UpstreamTotal  int  // 各分段上游 total_count 之和（含上游重复行口径）
+	FetchedRows    int  // 各分段实际取回的原始行数之和（本地去重/归并前）
+	RowsIncomplete bool // 任一分段上游 total_count 大于该分段实际取回原始行数；不能用合计值判断，避免差额相抵
+	TotalExact     bool // 快照未截断、全部分段完成时才为真；行数缺失另由 RowsIncomplete 表达
+	Truncated      bool // 任一分段 snapshot_truncated 或命中行上限
 }
 
 var logbotKnownSources = map[string]bool{"DA": true, "MTA": true, "PROXYSVR": true, "webadmin": true, "user_operation": true}
@@ -469,6 +472,15 @@ type logbotAttempt struct {
 	errKind string
 }
 
+// logbotExpectedStatus 是审计口径的成功状态码：submit 的异步任务创建响应
+// 正常为 202（也容忍 200），其余同步读取端点只有 200 是成功。
+func logbotExpectedStatus(stage string, status int) bool {
+	if stage == "submit" {
+		return status == http.StatusOK || status == http.StatusAccepted
+	}
+	return status == http.StatusOK
+}
+
 // emitAttempts 在 HTTP 状态映射与任务判定之后写审计：每次请求一条，
 // 最后一条带上映射后的错误类型（403/429/4xx/5xx、失败任务等）。
 func emitAttempts(ctx context.Context, stage, src, jobID, srcStatus, finalKind string, attempts []logbotAttempt) {
@@ -485,7 +497,7 @@ func emitAttempts(ctx context.Context, stage, src, jobID, srcStatus, finalKind s
 			Stage: stage, Sources: src, HTTPStatus: a.status,
 			DurationMS: a.dur.Milliseconds(), JobID: jobID,
 			SourceStatus: srcStatus, ErrorKind: errKind,
-			OK: errKind == "" && a.status == http.StatusOK,
+			OK: errKind == "" && logbotExpectedStatus(stage, a.status),
 		})
 	}
 }
@@ -628,7 +640,15 @@ func (c *LogBotClient) fetchResults(ctx context.Context, jobID string, sources [
 		merged.SnapshotTruncated = merged.SnapshotTruncated || page.SnapshotTruncated
 		merged.Status = page.Status
 		pageToken = page.NextPageToken
-		if pageToken == "" || len(merged.Rows) >= maxRows {
+		if pageToken == "" {
+			break
+		}
+		if len(merged.Rows) >= maxRows {
+			// 恰好顶满行上限且游标未耗尽时，上游明确还有下一页；
+			// 这与“刚好取完最后一页”不同，必须按截断处理。
+			if maxRows > 1 {
+				merged.SnapshotTruncated = true
+			}
 			break
 		}
 	}
@@ -705,7 +725,14 @@ DONE:
 		return nil, fail
 	}
 	c.auditJobOutcome(ctx, jobID, sources, res)
-	out := &logbotJobResult{Rows: res.Rows, Truncated: res.SnapshotTruncated, TotalExact: !res.SnapshotTruncated}
+	out := &logbotJobResult{
+		Rows:           res.Rows,
+		UpstreamTotal:  res.TotalCount,
+		FetchedRows:    len(res.Rows),
+		RowsIncomplete: wantRows && res.TotalCount > len(res.Rows),
+		Truncated:      res.SnapshotTruncated,
+		TotalExact:     !res.SnapshotTruncated,
+	}
 	if wantRows {
 		out.Total = len(res.Rows)
 	} else {
@@ -763,6 +790,18 @@ func logbotResultToQuery(res *logbotJobResult, source string, countOnly bool, se
 		out.Total = res.Total
 	} else {
 		out.Total = len(rows)
+		out.UpstreamTotal = res.UpstreamTotal
+		out.FetchedRows = res.FetchedRows
+		out.RowsIncomplete = res.RowsIncomplete
+	}
+	if !countOnly && (res.Truncated || res.UpstreamTotal > len(rows)) {
+		out.Limitations = append(out.Limitations, "上游命中 "+itoa(res.UpstreamTotal)+" 条（含上游重复行/快照外），本次取回 "+itoa(len(rows))+" 条（按来源过滤并去重/归并后）。")
+	}
+	if !countOnly && res.RowsIncomplete {
+		// 行数缺失按单个 job 判定；跨窗合计可能正负相抵，不能在这里给出
+		// 一个看似精确的缺失条数。
+		out.Truncated = true
+		out.Limitations = append(out.Limitations, "上游 total_count 显示至少一个任务有部分命中行未取回；本次结果不完整，不能把已返回行当作全量。")
 	}
 	if res.Truncated {
 		out.Truncated = true
@@ -780,6 +819,10 @@ func logbotResultToQuery(res *logbotJobResult, source string, countOnly bool, se
 		}
 	}
 	out.TotalExact = res.TotalExact && !out.Truncated
+	if !countOnly && res.RowsIncomplete {
+		// 缺失判断来自单 job 的 RowsIncomplete；跨窗合计的上游/取回行数可能差额相抵。
+		out.TotalExact = false
+	}
 	if out.TotalExact {
 		out.TotalRelation = "eq"
 	}

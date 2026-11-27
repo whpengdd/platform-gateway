@@ -58,13 +58,18 @@ func (s *Service) queryMTA(ctx context.Context, filters Filters, derived derived
 		}
 	}
 	sameSenderRecipient := derived.Sender != "" && derived.Recipient != "" && derived.Sender == derived.Recipient
+	maxRows := s.backend().MaxDetailRows()
+	if s.backendName() == "logbot" {
+		// LogBot 明细响应同时带 rows 与 total_count，且 DA 路径已证实
+		// count/detail 一致性假设不成立；先 count 只会把串行 job 数翻倍。
+		return s.queryMTALogBotDirect(ctx, filters, derived, requireComplete, maxRows)
+	}
 	countRes := s.backend().Query(ctx, filters, QueryOptions{CountOnly: true, Stage: "mta_exact_count"})
 	if !countRes.OK {
 		return mtaFailure(countRes)
 	}
-	maxRows := s.backend().MaxDetailRows()
-	// LogBot 的来源状态 limit/partial 给出的是「已加载行 + 不完整标记」，
-	// 按 spec 透传数据并附 limitations，而不是像 Kibana 不精确计数那样整体报错。
+	// Kibana 的不精确计数无法确认完整性，必须整体报错；LogBot 的
+	// limit/partial 透传语义已移到前面的明细直查分支。
 	incomplete := !countRes.TotalExact
 	tolerated := incomplete && (countRes.Truncated || countRes.Partial)
 	if requireComplete && incomplete && !tolerated {
@@ -154,6 +159,76 @@ func (s *Service) queryMTA(ctx context.Context, filters Filters, derived derived
 		HasMore:     ptrBool(res.Total > len(entries)),
 	}
 	if countRes.Truncated || res.Truncated {
+		out.Truncated = ptrBool(true)
+	}
+	return out
+}
+
+// queryMTALogBotDirect 是 LogBot 的 MTA 明细直查路径。完整性按三类真实信号判断：
+// TotalExact/Truncated/Partial 是上游快照状态；RowsIncomplete 由后端按单个 job
+// 比较上游 total_count 与该 job 实际取回原始行数后 OR 累积（不能用跨窗合计，
+// 否则正负差额会相抵）。requireComplete 用这些数据做本地精确过滤/聚合，任何一类
+// 不完整都必须拒绝；普通 analysis 则透传已取回行并附 limitations。
+func (s *Service) queryMTALogBotDirect(ctx context.Context, filters Filters, derived derivedQuery, requireComplete bool, maxRows int) DeliveryResult {
+	res := s.backend().Query(ctx, filters, QueryOptions{PageSize: maxRows, Stage: "mta_exact_detail"})
+	if !res.OK {
+		return mtaFailure(res)
+	}
+	incomplete := res.Truncated || res.Partial || !res.TotalExact || res.RowsIncomplete
+	if requireComplete && incomplete {
+		// 这里没有精确总数可填：res.Total 只是已取回并去重后的部分行数，
+		// UpstreamTotal 又含重复/快照外行；具体数字已经写进 limitations。
+		lim := append([]string{"MTA 明细未完整取回，无法完成本地精确过滤与聚合；本次不返回不完整结果。" + narrowQueryAdvice}, res.Limitations...)
+		return DeliveryResult{
+			Status:      "error",
+			Provider:    "log_platform",
+			Code:        "CK_LOGS_MTA_TRUNCATED",
+			Entries:     []Entry{},
+			Limitations: mergeLimitations(lim),
+			Truncated:   ptrBool(true),
+			CountOnly:   ptrBool(false),
+			HasMore:     ptrBool(false),
+		}
+	}
+	sameSenderRecipient := derived.Sender != "" && derived.Recipient != "" && derived.Sender == derived.Recipient
+	if res.Total == 0 && !incomplete {
+		canRetryRecipient := !sameSenderRecipient && derived.Recipient != "" && (derived.Sender != "" || derived.Subject != "" || derived.MsgID != "")
+		if canRetryRecipient {
+			// No verified indexed token field exists for compound recipient values.
+			// Removing Recipient loses the inbound account boundary; repeating the
+			// same phrase query cannot prove compound-address coverage either.
+			return recipientCoverageUnresolved("MTA", "CK_LOGS_RECIPIENT_FALLBACK_UNRESOLVED")
+		}
+		zeroNote := "该时间窗内按给定条件精确命中 0 条：我方日志无对应投递记录（非查询失败、非截断）。"
+		if sameSenderRecipient {
+			zeroNote = "发件人与收件人是同一个地址；该时间范围内没有查到发给自己的邮件。"
+		}
+		return DeliveryResult{
+			Status:      "ok",
+			Provider:    "log_platform",
+			Total:       ptrInt(0),
+			Entries:     []Entry{},
+			Limitations: append([]string{zeroNote}, res.Limitations...),
+			CountOnly:   ptrBool(false),
+			HasMore:     ptrBool(false),
+		}
+	}
+	entries := res.Entries
+	if entries == nil {
+		entries = []Entry{}
+	}
+	out := DeliveryResult{
+		Status:      "ok",
+		Provider:    "log_platform",
+		Total:       ptrInt(res.Total),
+		Entries:     entries,
+		Limitations: append([]string{}, res.Limitations...),
+		CountOnly:   ptrBool(false),
+		// 该 API 面不暴露 LogBot page token，调用方无法继续翻页；
+		// 不完整信息只能由 Truncated+limitations 承载，hasMore 恒 false。
+		HasMore: ptrBool(false),
+	}
+	if res.Truncated {
 		out.Truncated = ptrBool(true)
 	}
 	return out

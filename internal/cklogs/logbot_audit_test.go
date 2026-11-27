@@ -24,6 +24,22 @@ func auditCalls(t *testing.T, rec *auditlog.Record) []auditlog.LogBotCall {
 	return parsed.Calls
 }
 
+func TestAuditSubmitAcceptedAndLoginSuccessAreOK(t *testing.T) {
+	f := newLogbotFake(t)
+	res, calls := queryWithAudit(t, f)
+	if !res.OK {
+		t.Fatalf("%+v", res)
+	}
+	submit := lastCall(calls, "submit")
+	if submit.HTTPStatus != http.StatusAccepted || submit.ErrorKind != "" || !submit.OK {
+		t.Fatalf("submit 202 audit: %+v", submit)
+	}
+	login := lastCall(calls, "login")
+	if login.HTTPStatus != http.StatusOK || login.ErrorKind != "" || !login.OK {
+		t.Fatalf("login audit: %+v", login)
+	}
+}
+
 func TestAuditReloginMarksFirstAttemptAuthExpired(t *testing.T) {
 	for name, set := range map[string]func(*logbotFake){
 		"401":      func(f *logbotFake) { f.poll401Once = true },

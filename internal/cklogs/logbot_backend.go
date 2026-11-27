@@ -202,6 +202,9 @@ func (b LogBotBackend) runWindowed(ctx context.Context, buildReq func(fromAddr, 
 		}
 		merged.Rows = append(merged.Rows, res.Rows...)
 		merged.Total += res.Total
+		merged.UpstreamTotal += res.UpstreamTotal
+		merged.FetchedRows += res.FetchedRows
+		merged.RowsIncomplete = merged.RowsIncomplete || res.RowsIncomplete
 		merged.Truncated = merged.Truncated || res.Truncated
 		merged.TotalExact = merged.TotalExact && res.TotalExact
 		if end >= tr.ToMs {
@@ -245,6 +248,9 @@ func (b LogBotBackend) mergeDomainResults(outbound, inbound logbotRun, source st
 			merged.Rows = append(merged.Rows, row)
 		}
 		merged.Total += run.result.Total
+		merged.UpstreamTotal += run.result.UpstreamTotal
+		merged.FetchedRows += run.result.FetchedRows
+		merged.RowsIncomplete = merged.RowsIncomplete || run.result.RowsIncomplete
 		merged.Truncated = merged.Truncated || run.result.Truncated
 		merged.TotalExact = merged.TotalExact && run.result.TotalExact
 	}
