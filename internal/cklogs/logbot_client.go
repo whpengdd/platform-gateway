@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -29,9 +30,15 @@ const (
 
 	logbotDefaultPollInterval = 500 * time.Millisecond
 	logbotMaxPollInterval     = 3 * time.Second
-	logbotMaxResponseBytes    = 16 << 20
+	// logbot 限频重试默认值：429 时按 base×2^n + jitter 退避，
+	// 最多重试 maxRetries 次；预算受 ctx 剩余时间约束（见 call）。
+	logbotDefaultRateLimitRetries = 3
+	logbotDefaultRateLimitBackoff = 500 * time.Millisecond
+	logbotRateLimitBackoffCap     = 4 * time.Second
+	logbotRateLimitRetryMargin    = 3 * time.Second
+	logbotMaxResponseBytes        = 16 << 20
 	// logbotResultsPageSize 是 results 端点实测上限（page_size=100 放行、200 即 400）。
-	logbotResultsPageSize     = 100
+	logbotResultsPageSize = 100
 )
 
 // LogBotClient 走 LogBot agent 异步任务 API：
@@ -52,6 +59,10 @@ type LogBotClient struct {
 	// HTTPClient 必须不跟随重定向（302 会把请求带去 SSO 登录页）；
 	// 为空时使用内部构造的不跳转客户端。
 	HTTPClient *http.Client
+	// RateLimitMaxRetries/RateLimitBackoff 控制 429 重试：
+	// 0 表示用默认值（3 次 / 500ms 起步）；负数禁用重试。
+	RateLimitMaxRetries int
+	RateLimitBackoff    time.Duration
 
 	mu      sync.Mutex
 	cookies []*http.Cookie
@@ -73,6 +84,42 @@ func (c *LogBotClient) pollInterval() time.Duration {
 		return c.PollInterval
 	}
 	return logbotDefaultPollInterval
+}
+
+func (c *LogBotClient) rateLimitRetries() int {
+	if c.RateLimitMaxRetries < 0 {
+		return 0
+	}
+	if c.RateLimitMaxRetries > 0 {
+		return c.RateLimitMaxRetries
+	}
+	return logbotDefaultRateLimitRetries
+}
+
+func (c *LogBotClient) rateLimitBackoff() time.Duration {
+	if c.RateLimitBackoff > 0 {
+		return c.RateLimitBackoff
+	}
+	return logbotDefaultRateLimitBackoff
+}
+
+// rateLimitSleep 计算第 n 次（0 起）429 重试的退避时长：base×2^n 封顶，
+// 加 ±25% jitter 避免多客户端同拍。睡眠时间不可超过 ctx 剩余预算减去余量
+// （无 deadline 时不受限），返回 ok=false 表示预算不足、不应重试。
+func (c *LogBotClient) rateLimitSleep(ctx context.Context, n int) (time.Duration, bool) {
+	d := c.rateLimitBackoff() << n
+	if d > logbotRateLimitBackoffCap {
+		d = logbotRateLimitBackoffCap
+	}
+	jitter := time.Duration(rand.Float64() * float64(d) / 2)
+	d = d - time.Duration(float64(d)/4) + jitter
+	if deadline, ok := ctx.Deadline(); ok {
+		remaining := time.Until(deadline)
+		if remaining < d+logbotRateLimitRetryMargin {
+			return 0, false
+		}
+	}
+	return d, true
 }
 
 func (c *LogBotClient) baseURL() string {
@@ -223,6 +270,7 @@ func (c *LogBotClient) call(ctx context.Context, method, path string, body []byt
 		}
 	}
 	retried := false
+	rateRetries := 0
 	for {
 		status, raw, dur, fail := c.rawDo(ctx, method, path, body, contentType)
 		errKind := ""
@@ -232,6 +280,10 @@ func (c *LogBotClient) call(ctx context.Context, method, path string, body []byt
 		willRelogin := fail == nil && (status == http.StatusUnauthorized || isRedirectStatus(status)) && c.Token == "" && !retried
 		if willRelogin {
 			errKind = "auth_expired"
+		}
+		is429 := fail == nil && status == http.StatusTooManyRequests
+		if is429 {
+			errKind = "rate_limited"
 		}
 		if record != nil {
 			record(status, dur, errKind)
@@ -245,6 +297,19 @@ func (c *LogBotClient) call(ctx context.Context, method, path string, body []byt
 				return status, nil, fail
 			}
 			continue
+		}
+		if is429 && rateRetries < c.rateLimitRetries() {
+			if sleep, ok := c.rateLimitSleep(ctx, rateRetries); ok {
+				rateRetries++
+				timer := time.NewTimer(sleep)
+				select {
+				case <-ctx.Done():
+					timer.Stop()
+					// 上下文到期/取消：不再重试，把 429 交还调用方如实映射。
+				case <-timer.C:
+					continue
+				}
+			}
 		}
 		return status, raw, nil
 	}

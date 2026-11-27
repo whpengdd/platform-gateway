@@ -19,27 +19,28 @@ import (
 type logbotFake struct {
 	srv *httptest.Server
 
-	mu            sync.Mutex
-	logins        int
-	submits       int
-	polls         int
-	resultCalls   int
-	lastReq       map[string]any
-	reqs          []map[string]any
-	failLogin     bool
-	poll401Once   bool
-	redirectOnce  bool
-	submitStatus  int
-	submitDetail  string
-	resultsStatus int
-	jobStatuses   []string // 每次轮询依次返回；耗尽后返回 success
-	neverDone     bool     // 轮询恒为 running（预算耗尽测试）
-	jobError      string
-	rows          []map[string]any
-	truncated     bool // 结果快照标记 snapshot_truncated
-	totalCount    int  // 覆盖 total_count；-1 表示按匹配行数
-	jobs          map[string]map[string]any
-	nextJob       int
+	mu             sync.Mutex
+	logins         int
+	submits        int
+	polls          int
+	resultCalls    int
+	lastReq        map[string]any
+	reqs           []map[string]any
+	failLogin      bool
+	poll401Once    bool
+	redirectOnce   bool
+	submitStatus   int
+	submitDetail   string
+	submit429Times int // 前 N 次 submit 返回 429（耗尽后正常）
+	resultsStatus  int
+	jobStatuses    []string // 每次轮询依次返回；耗尽后返回 success
+	neverDone      bool     // 轮询恒为 running（预算耗尽测试）
+	jobError       string
+	rows           []map[string]any
+	truncated      bool // 结果快照标记 snapshot_truncated
+	totalCount     int  // 覆盖 total_count；-1 表示按匹配行数
+	jobs           map[string]map[string]any
+	nextJob        int
 }
 
 func newLogbotFake(t *testing.T) *logbotFake {
@@ -65,6 +66,10 @@ func newLogbotFake(t *testing.T) *logbotFake {
 		f.submits++
 		authed := f.hasAuthLocked(r)
 		status := f.submitStatus
+		if status == 0 && f.submit429Times > 0 {
+			f.submit429Times--
+			status = http.StatusTooManyRequests
+		}
 		detail := f.submitDetail
 		var req map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&req)
@@ -223,12 +228,14 @@ func (f *logbotFake) client() *LogBotClient {
 	hc := f.srv.Client()
 	hc.CheckRedirect = func(req *http.Request, via []*http.Request) error { return http.ErrUseLastResponse }
 	return &LogBotClient{
-		BaseURL:      f.srv.URL,
-		Username:     "unit-svc-account",
-		Password:     "unit-svc-password",
-		PollInterval: time.Millisecond,
-		Timeout:      5 * time.Second,
-		HTTPClient:   hc,
+		BaseURL:             f.srv.URL,
+		Username:            "unit-svc-account",
+		Password:            "unit-svc-password",
+		PollInterval:        time.Millisecond,
+		Timeout:             5 * time.Second,
+		RateLimitBackoff:    time.Millisecond,
+		RateLimitMaxRetries: 2,
+		HTTPClient:          hc,
 	}
 }
 

@@ -85,12 +85,14 @@ func setupLogbotAPI(t *testing.T, f *logbotHTTPFake) *httptest.Server {
 	hc := f.srv.Client()
 	hc.CheckRedirect = func(req *http.Request, via []*http.Request) error { return http.ErrUseLastResponse }
 	svc := cklogs.NewLogBotService(&cklogs.LogBotClient{
-		BaseURL:      f.srv.URL,
-		Username:     "unit-svc-account",
-		Password:     "unit-svc-password",
-		PollInterval: time.Millisecond,
-		Timeout:      5 * time.Second,
-		HTTPClient:   hc,
+		BaseURL:             f.srv.URL,
+		Username:            "unit-svc-account",
+		Password:            "unit-svc-password",
+		PollInterval:        time.Millisecond,
+		Timeout:             5 * time.Second,
+		RateLimitBackoff:    time.Millisecond,
+		RateLimitMaxRetries: 2,
+		HTTPClient:          hc,
 	})
 	h := New(Config{
 		Auth:    auth.NewWithClasses([]string{testToken}, []string{internalToken}, nil),
