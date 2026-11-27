@@ -73,7 +73,9 @@ type LogBotCall struct {
 }
 
 // maxLogBotCalls 防止长轮询把审计记录撑大；超出后只保留尾部状态。
-const maxLogBotCalls = 32
+// LogBot 多分窗查询单请求可达 40-80 次调用（6 个日切 job x submit/poll/results），
+// 32 会把重试与终态挤出可视范围，128 覆盖 7 天窗口的最坏 fan-out。
+const maxLogBotCalls = 128
 
 func NewRecord(r *http.Request, now time.Time, loc *time.Location) *Record {
 	if loc == nil {
